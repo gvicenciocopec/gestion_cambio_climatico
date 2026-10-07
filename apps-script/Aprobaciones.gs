@@ -11,9 +11,10 @@
  * - Un mismo PR aún 'Pendiente' se actualiza con el correo más nuevo; un PR ya procesado ignora recordatorios.
  * - Un correo que no se puede leer bien queda igual registrado (lectura 'parcial', con su asunto).
  * API pública (todas sólo admin): aprobScan, aprobLink, aprobNewLine, aprobDiscard, aprobReset, aprobInstall,
- * aprobScanTrigger (activador). Para todo el equipo: aprobMailView (sólo lectura del correo de respaldo de una solicitud
- * ya registrada en una línea: el ojo del presupuesto). Internas: aprobRead_ (bundle), aprobMailRefs_ (bundle, todo el
- * equipo), aprobStatus_ (Ajustes, exacto), aprobStatusFast_ (bundle, sin activadores), aprobParse_ (pura, probada).
+ * aprobScanTrigger (activador). Para todo el equipo: aprobMailView (pantallazo guardado del correo de una solicitud ya
+ * registrada en una línea: el ojo del presupuesto; nunca lee Gmail). Internas: aprobRead_ (bundle), aprobMailRefs_
+ * (bundle, todo el equipo), aprobStatus_ (Ajustes, exacto), aprobStatusFast_ (bundle, sin activadores), aprobParse_
+ * (pura, probada), aprobSnap*_ (pantallazos: pestaña oculta APROB_SNAP_SHEET).
  */
 
 const APROB_HEADERS = [
@@ -28,6 +29,12 @@ const APROB_PROP_RESULT = 'APROB_LAST_RESULT';
 const APROB_PROP_SCHEDULE = 'APROB_SCHEDULE'; // horario con que se instaló el activador (para reinstalar si cambia)
 const APROB_QUERY_DAYS = 120;
 const APROB_MAX_THREADS = 50;
+// Pantallazos del correo de respaldo (ojo del presupuesto): copia fija del correo de Ariba, una fila por solicitud.
+const APROB_SNAP_SHEET = 'Capturas de correo';
+const APROB_SNAP_HEADERS = ['ID', 'Gmail ID', 'Capturado', 'Asunto', 'De', 'Fecha', 'Captura']; // la captura sigue en G, H…
+const APROB_SNAP_PART = 45000;  // caracteres por celda (Sheets admite 50.000)
+const APROB_SNAP_PARTS = 10;    // celdas por captura como máximo; un correo más grande se guarda como texto
+const APROB_SNAP_BATCH = 20;    // pantallazos pendientes que toma cada «Revisar ahora» / activador
 const APROB_MESES = {
   enero: 1, ene: 1, january: 1, jan: 1, febrero: 2, feb: 2, february: 2, marzo: 3, mar: 3, march: 3,
   abril: 4, abr: 4, april: 4, apr: 4, mayo: 5, may: 5, junio: 6, jun: 6, june: 6, julio: 7, jul: 7, july: 7,
@@ -66,9 +73,11 @@ function aprobScan() {
     aprobSaveResult_({ error: msg, at: new Date().toISOString() });
     throw new Error('No pude leer Gmail: ' + msg + '. Si es la primera vez, autoriza el permiso de Gmail ejecutando aprobInstall desde el editor.');
   }
+  const snaps = aprobSnapPending_(ss_()); // pantallazos que faltan (lee Gmail, fuera del lock)
   let res = null;
   const b = mutate_(() => {
     res = aprobStore_(f.items, f.errors);
+    aprobSnapSave_(ss_(), snaps);
     return {};
   });
   if (b && typeof b === 'object') {
@@ -89,6 +98,7 @@ function aprobLink(id, data) {
   aprobMonto_(d.monto, 0); // formato antes del lock
   const nota = aprobNota_(d.nota);
   const marcar = aprobBool_(d.marcarOc);
+  const snap = aprobSnapFor_(id); // pantallazo del correo para el equipo (lee Gmail, fuera del lock)
   return mutate_(() => {
     const ss = ss_();
     const sol = aprobEdit_(ss, id, rec => {
@@ -104,6 +114,7 @@ function aprobLink(id, data) {
       log_('Vincular solicitud', aprobLabel_(rec), [presTabName_(y), line.proj, 'imputado ' + presMoney_(monto),
         marcar ? 'OC emitida' : ''].filter(Boolean).join(' · '));
     });
+    aprobSnapSave_(ss, [snap]);
     return { lastId: sol.id };
   });
 }
@@ -119,6 +130,7 @@ function aprobNewLine(id, data) {
   aprobMonto_(d.monto, 0);
   const nota = aprobNota_(d.nota);
   const proj = str_(d.proj).replace(/\s+/g, ' ');
+  const snap = aprobSnapFor_(id);
   return mutate_(() => {
     const ss = ss_();
     const sol = aprobEdit_(ss, id, rec => {
@@ -133,6 +145,7 @@ function aprobNewLine(id, data) {
       aprobStamp_(rec);
       log_('Solicitud a línea nueva', aprobLabel_(rec), [presTabName_(y), 'línea ' + r.id, presMoney_(monto)].join(' · '));
     });
+    aprobSnapSave_(ss, [snap]);
     return { lastId: sol.id };
   });
 }
@@ -190,7 +203,12 @@ function aprobScanTrigger(e) {
   if (!isAdmin_() && !aprobTriggerEvent_(e)) aprobAssertAdmin_();
   try {
     const f = aprobFetch_(aprobKnown_(ss_()));
-    const res = withLock_(() => aprobStore_(f.items, f.errors));
+    const snaps = aprobSnapPending_(ss_());
+    const res = withLock_(() => {
+      const r = aprobStore_(f.items, f.errors);
+      aprobSnapSave_(ss_(), snaps);
+      return r;
+    });
     return aprobPublicResult_(res);
   } catch (err) {
     const msg = aprobErr_(err);
@@ -201,80 +219,226 @@ function aprobScanTrigger(e) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Correo de respaldo para todo el equipo (ojo del presupuesto)        */
+/* Pantallazo del correo de respaldo (ojo del presupuesto)             */
 /* ------------------------------------------------------------------ */
 
-// El hilo vive en el Gmail del dueño del script (la app corre como él): el link de Gmail sólo le sirve a él. Al resto
-// del equipo se le muestra el correo dentro de la app. Sólo solicitudes ya registradas en una línea ('Vinculada' /
-// 'Nueva línea') y sólo mensajes del remitente de Ariba: nunca otro correo del buzón.
-// → {id, pr, asunto, de, fecha ISO, cuerpo (texto plano, sin links de acción), hiloUrl ('' salvo administradores)}
+// El correo vive en el Gmail del dueño del script y el equipo NUNCA lo abre ni lo lee en vivo. Cuando el administrador
+// registra la solicitud en una línea (aprobLink / aprobNewLine) o pulsa «Revisar ahora» (aprobScan, y el activador
+// diario), se guarda una copia fija del correo de Ariba (pantallazo, sin links ni scripts) en la pestaña oculta
+// APROB_SNAP_SHEET. El ojo del presupuesto muestra esa copia; esta función sólo lee la planilla, nunca Gmail.
+// → {id, pr, asunto, de, fecha ISO, capturado ISO, html (pantallazo), hiloUrl ('' salvo administradores)}
 function aprobMailView(id) {
   assertMember_();
   if (!isMember_(me_())) throw new Error('Entra con tu cuenta del equipo para ver el correo de respaldo.');
-  aprobAssertGmail_();
+  const ss = ss_();
   const sid = str_(id);
-  const sh = sid ? ss_().getSheetByName(aprobSheetName_()) : null;
+  const sh = sid ? ss.getSheetByName(aprobSheetName_()) : null;
   const x = sh && sh.getLastRow() >= 2 ? aprobRecs_(aprobTable_(sh)).find(r => r.rec.id === sid) : null;
-  if (!x || !aprobHasMail_(x.rec)) throw new Error('Esta línea no tiene un correo de respaldo disponible.');
-  const rec = x.rec;
-  const sender = aprobSender_();
-  let msg = null;
-  rec.gmailIds.some(gid => { // el más nuevo primero
-    try {
-      const m = GmailApp.getMessageById(gid);
-      if (m && str_(m.getFrom()).toLowerCase().indexOf(sender) >= 0) msg = m;
-    } catch (e) {
-      console.warn('aprobMailView: no se pudo leer ' + gid + ': ' + aprobErr_(e));
-    }
-    return !!msg;
-  });
-  if (!msg) throw new Error('No encontré el correo de respaldo en Gmail (puede que se haya eliminado).');
-  let body = '';
-  try { body = String(msg.getPlainBody() || ''); } catch (e) { body = ''; }
-  if (!body.trim()) {
-    try { body = aprobHtmlText_(msg.getBody()); } catch (e) { body = ''; }
+  if (!x || !aprobLinked_(x.rec)) throw new Error('Esta línea no tiene un correo de respaldo disponible.');
+  const snap = aprobSnapRead_(ss, sid);
+  if (!snap) {
+    throw new Error('Aún no hay pantallazo de este correo. Se guarda cuando el administrador pulsa «Revisar ahora» en Solicitudes de compra.');
   }
-  let asunto = rec.asunto, de = '', fecha = rec.recibido;
-  try { asunto = aprobOneLine_(msg.getSubject()) || asunto; } catch (e) { /* queda el asunto registrado */ }
-  try { de = aprobOneLine_(msg.getFrom()); } catch (e) { de = ''; }
-  try { fecha = aprobIso_(msg.getDate()) || fecha; } catch (e) { /* queda la fecha registrada */ }
+  const rec = x.rec;
   return {
-    id: rec.id, pr: rec.pr, asunto: asunto, de: de, fecha: fecha, cuerpo: aprobMailText_(body),
-    hiloUrl: isAdmin_() && /^https:\/\//i.test(rec.hiloUrl) ? rec.hiloUrl : '',
+    id: rec.id, pr: rec.pr, asunto: snap.asunto || rec.asunto, de: snap.de, fecha: snap.fecha || rec.recibido,
+    capturado: snap.capturado, html: snap.html, hiloUrl: isAdmin_() && /^https:\/\//i.test(rec.hiloUrl) ? rec.hiloUrl : '',
   };
 }
 
 // Refs del ojo del presupuesto para TODO el equipo (bundle `budgetMails`): [{id, lineId, pr, fecha ISO|'', recibido}]
-// de las solicitudes registradas en una línea, más recientes primero. Sin montos, solicitante ni link de Gmail.
-// sols: las Sol que el bundle ya leyó (administrador), para no releer la hoja.
+// de las solicitudes registradas en una línea que ya tienen pantallazo, más recientes primero. Sin montos, solicitante
+// ni link de Gmail. sols: las Sol que el bundle ya leyó (administrador), para no releer la hoja.
 function aprobMailRefs_(ss, sols) {
-  if (!featureOn_('GMAIL')) return []; // modo seguro: el equipo no podría abrir el correo
+  const book = ss || ss_();
+  const snaps = aprobSnapIds_(book);
+  if (!Object.keys(snaps).length) return [];
   let list = sols;
   if (!Array.isArray(list)) {
-    const sh = (ss || ss_()).getSheetByName(aprobSheetName_());
+    const sh = book.getSheetByName(aprobSheetName_());
     if (!sh || sh.getLastRow() < 2) return [];
     const t = aprobTable_(sh);
     if (t.idx.ID < 0) return [];
-    list = aprobRecs_(t).filter(x => aprobHasMail_(x.rec)).map(x => aprobSol_(x.rec));
+    list = aprobRecs_(t).filter(x => snaps[x.rec.id] && aprobLinked_(x.rec)).map(x => aprobSol_(x.rec));
   }
-  return list.filter(s => s && s.gmailId && s.lineId && (s.estado === 'Vinculada' || s.estado === 'Nueva línea'))
+  return list.filter(s => s && snaps[s.id] && aprobLinked_(s))
     .map(s => ({ id: s.id, lineId: s.lineId, pr: s.pr, fecha: s.fecha || '', recibido: s.recibido || '' }))
     .sort((a, b) => (a.recibido < b.recibido ? 1 : a.recibido > b.recibido ? -1 : 0)); // como aprobRead_
 }
 
-function aprobHasMail_(rec) {
-  return !!(rec && rec.gmailIds.length && rec.lineId && (rec.estado === 'Vinculada' || rec.estado === 'Nueva línea'));
+// Registrada en una línea (rec del sheet o Sol del bundle)
+function aprobLinked_(r) {
+  return !!(r && r.lineId && (r.estado === 'Vinculada' || r.estado === 'Nueva línea'));
 }
 
-// Cuerpo para mostrar: sin los links de Aprobar / Denegar / Ver (<mailto:…>, <https://…>), sin espacios de sobra.
+// Pantallazo de la solicitud que se va a registrar (aprobLink / aprobNewLine, antes del lock). null si ya tiene uno, si
+// Gmail está apagado (modo seguro) o si no se pudo leer: «Revisar ahora» lo vuelve a intentar. Nunca lanza.
+function aprobSnapFor_(id) {
+  if (!featureOn_('GMAIL')) return null;
+  try {
+    const ss = ss_();
+    const sid = str_(id);
+    if (!sid || aprobSnapIds_(ss)[sid]) return null;
+    const sh = ss.getSheetByName(aprobSheetName_());
+    const x = sh && sh.getLastRow() >= 2 ? aprobRecs_(aprobTable_(sh)).find(r => r.rec.id === sid) : null;
+    return x ? aprobSnapTake_(x.rec) : null;
+  } catch (e) {
+    console.warn('aprobSnapFor_: ' + aprobErr_(e));
+    return null;
+  }
+}
+
+// Pantallazos que faltan: solicitudes registradas en una línea sin captura (hasta APROB_SNAP_BATCH por vuelta; lee
+// Gmail, fuera del lock). Cubre lo registrado antes de esta versión y lo que falló al vincular. → [snap]. Nunca lanza.
+function aprobSnapPending_(ss) {
+  if (!featureOn_('GMAIL')) return [];
+  try {
+    const sh = ss.getSheetByName(aprobSheetName_());
+    if (!sh || sh.getLastRow() < 2) return [];
+    const have = aprobSnapIds_(ss);
+    const out = [];
+    aprobRecs_(aprobTable_(sh)).map(x => x.rec).filter(r => aprobLinked_(r) && !have[r.id] && r.gmailIds.length)
+      .slice(0, APROB_SNAP_BATCH).forEach(r => {
+        const snap = aprobSnapTake_(r);
+        if (snap) out.push(snap);
+      });
+    return out;
+  } catch (e) {
+    console.warn('aprobSnapPending_: ' + aprobErr_(e));
+    return [];
+  }
+}
+
+// Toma el pantallazo del correo de Ariba más nuevo de la solicitud (lee Gmail: sólo administrador / activador).
+// Nunca usa un correo de otro remitente. → {id, gmailId, asunto, de, fecha ISO, html} | null
+function aprobSnapTake_(rec) {
+  const sender = aprobSender_();
+  let snap = null;
+  rec.gmailIds.some(gid => { // el más nuevo primero
+    try {
+      const m = GmailApp.getMessageById(gid);
+      if (!m || str_(m.getFrom()).toLowerCase().indexOf(sender) < 0) return false;
+      let html = '';
+      try { html = aprobSnapHtml_(m.getBody()); } catch (e) { html = ''; }
+      if (!aprobHtmlText_(html).trim() || html.length > APROB_SNAP_PART * APROB_SNAP_PARTS) {
+        let plain = '';
+        try { plain = String(m.getPlainBody() || ''); } catch (e) { plain = ''; }
+        if (!plain.trim()) plain = aprobHtmlText_(html);
+        html = plain.trim() ? '<pre style="margin:0;white-space:pre-wrap;word-wrap:break-word;font:13px/1.5 Arial,Helvetica,sans-serif">' +
+          aprobEsc_(aprobMailText_(plain)) + '</pre>' : '';
+      }
+      if (!html) return false;
+      let asunto = rec.asunto, fecha = rec.recibido;
+      try { asunto = aprobOneLine_(m.getSubject()) || asunto; } catch (e) { /* queda el asunto registrado */ }
+      try { fecha = aprobIso_(m.getDate()) || fecha; } catch (e) { /* queda la fecha registrada */ }
+      snap = { id: rec.id, gmailId: gid, asunto: asunto, de: aprobOneLine_(m.getFrom()), fecha: fecha, html: html };
+      return true;
+    } catch (e) {
+      console.warn('aprobSnapTake_: no se pudo leer ' + gid + ': ' + aprobErr_(e));
+      return false;
+    }
+  });
+  return snap;
+}
+
+// HTML del correo → pantallazo: se conservan el diseño (tablas, estilos, imágenes https) y el texto; se quitan scripts,
+// formularios, marcos, eventos y TODOS los links (Aprobar / Denegar / Ver llevan el permiso del aprobador).
+function aprobSnapHtml_(html) {
+  let s = String(html || '');
+  const styles = (s.match(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi) || [])
+    .map(x => x.replace(/@import[^;]*;?/gi, '').replace(/expression\s*\(/gi, '(')).join('\n');
+  const body = s.match(/<body\b[^>]*>([\s\S]*)<\/body\s*>/i);
+  if (body) s = body[1];
+  s = s.replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<(script|style|head|title|noscript|template|iframe|object|embed|applet|form|textarea|select|button|svg|math)\b[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<\/?(script|style|iframe|frame|frameset|object|embed|applet|form|input|button|textarea|select|option|link|meta|base|html|head|body|title|noscript|template|svg|math)\b[^>]*>/gi, '')
+    .replace(/\s(on[a-z]+|href|action|formaction|xlink:href|srcset|ping|target)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\ssrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, (m, v) => (/^["']?(https:|data:image\/)/i.test(v) ? m : ''))
+    .replace(/<a\b/gi, '<span').replace(/<\/a\s*>/gi, '</span>');
+  return ((styles ? styles + '\n' : '') + s).trim();
+}
+
+function aprobEsc_(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Cuerpo en texto (pantallazo de un correo sin HTML): sin los links de Aprobar / Denegar / Ver, sin espacios de sobra.
 function aprobMailText_(s) {
   const t = String(s || '').replace(/\r\n?/g, '\n')
     .replace(/[ \t]*<\s*(mailto|https?):[^>]*>/gi, '')
     .replace(/[ \t]*\bmailto:\S+/gi, '')
-    .replace(/[ \t\u00a0]+$/gm, '')
+    .replace(/[ \t ]+$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   return t.length > 30000 ? t.slice(0, 30000) + '\n…' : t;
+}
+
+// {SOL-…: fila} de los pantallazos guardados (lee sólo la columna ID; sin lock)
+function aprobSnapIds_(ss) {
+  const out = {};
+  const sh = ss.getSheetByName(APROB_SNAP_SHEET);
+  if (!sh || sh.getLastRow() < 2) return out;
+  sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues().forEach((r, i) => {
+    const id = aprobTxt_(r[0]);
+    if (id && !out[id]) out[id] = i + 2;
+  });
+  return out;
+}
+
+// → {id, gmailId, capturado ISO, asunto, de, fecha ISO, html} | null
+function aprobSnapRead_(ss, id) {
+  const row = aprobSnapIds_(ss)[id];
+  if (!row) return null;
+  const sh = ss.getSheetByName(APROB_SNAP_SHEET);
+  const v = sh.getRange(row, 1, 1, sh.getLastColumn()).getValues()[0];
+  const html = v.slice(APROB_SNAP_HEADERS.length - 1).map(p => String(p == null ? '' : p))
+    .filter(p => p.charAt(0) === '|').map(p => p.slice(1)).join('');
+  if (!html) return null;
+  return {
+    id: id, gmailId: aprobTxt_(v[1]), capturado: aprobIso_(v[2]), asunto: aprobTxt_(v[3]), de: aprobTxt_(v[4]),
+    fecha: aprobIso_(v[5]), html: html,
+  };
+}
+
+// Obtiene (o crea y oculta) la pestaña de pantallazos. Sólo dentro del lock.
+function aprobSnapSheet_(ss) {
+  let sh = ss.getSheetByName(APROB_SNAP_SHEET);
+  if (sh) return sh;
+  sh = ss.insertSheet(APROB_SNAP_SHEET, ss.getNumSheets());
+  sh.getRange(1, 1, 1, APROB_SNAP_HEADERS.length).setValues([APROB_SNAP_HEADERS]).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  try { sh.hideSheet(); } catch (e) { /* es la única pestaña visible */ }
+  return sh;
+}
+
+// Guarda (o reemplaza) pantallazos; la captura va en trozos de APROB_SNAP_PART, cada uno con "|" adelante para que
+// Sheets nunca lo lea como número, fecha o fórmula. Sólo dentro del lock. Nunca lanza (se reintenta en la próxima
+// revisión). → cuántos se guardaron
+function aprobSnapSave_(ss, snaps) {
+  let n = 0;
+  (snaps || []).forEach(snap => {
+    if (!snap || !snap.id || !snap.html) return;
+    try {
+      const sh = aprobSnapSheet_(ss);
+      const row = aprobSnapIds_(ss)[snap.id] || Math.max(sh.getLastRow(), 1) + 1;
+      const parts = [];
+      for (let i = 0; i < snap.html.length; i += APROB_SNAP_PART) parts.push('|' + snap.html.slice(i, i + APROB_SNAP_PART));
+      const head = APROB_SNAP_HEADERS.length - 1;
+      const width = Math.max(sh.getLastColumn(), head + parts.length); // borra trozos de una captura anterior más larga
+      if (width > sh.getMaxColumns()) sh.insertColumnsAfter(sh.getMaxColumns(), width - sh.getMaxColumns());
+      if (row > sh.getMaxRows()) sh.insertRowsAfter(sh.getMaxRows(), Math.max(row - sh.getMaxRows(), 20));
+      const txt = v => { const x = str_(v); return x.charAt(0) === '=' ? "'" + x : x; };
+      const vals = [snap.id, snap.gmailId, aprobDateCell_(new Date().toISOString()), txt(snap.asunto), txt(snap.de),
+        aprobDateCell_(snap.fecha)].concat(parts);
+      while (vals.length < width) vals.push('');
+      const fmts = vals.map((v, j) => (j === 2 || j === 5 ? 'yyyy-mm-dd hh:mm' : '@'));
+      sh.getRange(row, 1, 1, width).setNumberFormats([fmts]).setValues([vals]);
+      n++;
+    } catch (e) {
+      console.error('aprobSnapSave_: no se pudo guardar el pantallazo de ' + snap.id + ': ' + aprobErr_(e));
+    }
+  });
+  return n;
 }
 
 /* ------------------------------------------------------------------ */

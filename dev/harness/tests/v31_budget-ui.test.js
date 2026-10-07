@@ -1,6 +1,6 @@
 /* v3.1 · Presupuesto y Solicitudes (cliente): VPresupuesto.html + VAprobaciones.html (SPEC §14.4).
    - Ojo «Ver correo de respaldo» en la tabla, las tarjetas móviles y el detalle de línea. Con «Ver como admin» abre el
-     hilo en Gmail; para el resto del equipo (v3.7, S.budgetMails) abre el correo en la app (aprobMailView).
+     hilo en Gmail; para el resto del equipo (v3.7, S.budgetMails) muestra el pantallazo guardado (aprobMailView).
    - Menos texto: sin subtítulos explicativos, «Cómo funciona», «Todo al día…», etc. (los números y acciones siguen).
    Se evalúa el <script> real de cada vista con las primitivas reales de Core.html y stubs mínimos del navegador. */
 (function () {
@@ -228,10 +228,10 @@
     ok(A.indexOf('budget.mail') < 0, 'administrador: sin visor');
   });
 
-  test('v37 presupuesto · equipo: «Ver correo» pide aprobMailView una vez y muestra el texto escapado (o el error)', function () {
+  test('v37 presupuesto · equipo: «Ver correo» pide el pantallazo una vez y lo muestra aislado, como imagen (o el error)', function () {
     var mails = [TEAM_MAILS[1]];
     var R = { id: 'SOL-new', pr: 'PR200', asunto: 'Solicitud de compra <b>PR200</b>', de: 'Ariba <buyer@ariba.com>', fecha: '2026-09-15T13:00:00.000Z',
-      cuerpo: 'Importe total\n<script>alert(1)</script>', hiloUrl: '' };
+      capturado: '2026-09-16T12:00:00.000Z', html: '<table><tr><td>Importe "total" & más</td></tr></table>', hiloUrl: '' };
     var E = budEnv({ admin: false, mails: mails, reply: { aprobMailView: R } });
     E.lines();
     ok(typeof E.actions['budget.mail'] === 'function', 'acción registrada');
@@ -239,22 +239,31 @@
     deepEq(E.runs, [{ fn: 'aprobMailView', args: ['SOL-new'] }]);
     eq(E.modals.length, 1);
     eq(E.modals[0].opts.title, 'Correo de respaldo · PR200');
+    eq(E.modals[0].opts.size, 'xl', 'ancho para que el correo se vea a tamaño real');
     var h = E.modals[0].body.innerHTML;
     includes(h, 'Solicitud de compra &lt;b&gt;PR200&lt;/b&gt;', 'asunto escapado');
     includes(h, 'Ariba &lt;buyer@ariba.com&gt;', 'remitente escapado');
-    includes(h, 'Importe total\n&lt;script&gt;alert(1)&lt;/script&gt;', 'cuerpo escapado, con sus saltos de línea');
-    ok(h.indexOf('<script>') < 0, 'nada se inyecta');
-    includes(h, 'whitespace-pre-wrap');
+    includes(h, 'Pantallazo guardado el ');
+    // El pantallazo va en un iframe aislado: sandbox SIN allow-scripts, CSP propia y el HTML escapado dentro de srcdoc
+    var tag = (h.match(/<iframe data-snap [^>]*>/) || [''])[0];
+    ok(tag, 'iframe del pantallazo');
+    includes(tag, 'sandbox="allow-same-origin"');
+    ok(tag.indexOf('allow-scripts') < 0 && tag.indexOf('allow-popups') < 0 && tag.indexOf('allow-top-navigation') < 0, 'sin permisos extra');
+    includes(tag, 'referrerpolicy="no-referrer"');
+    includes(tag, '&lt;table&gt;&lt;tr&gt;&lt;td&gt;Importe &quot;total&quot; &amp; más&lt;/td&gt;', 'HTML del correo escapado en srcdoc');
+    includes(tag, 'Content-Security-Policy');
+    includes(tag, 'default-src &#39;none&#39;; img-src https: data:', 'sólo imágenes https, sin scripts ni conexiones');
+    ok(h.indexOf('<table>') < 0, 'el correo nunca entra al DOM de la app');
     ok(h.indexOf('Abrir en Gmail') < 0, 'sin link de Gmail para el equipo');
     E.actions['budget.mail']({ id: 'SOL-new' });
-    eq(E.runs.length, 1, 'la segunda vez usa el correo ya leído');
+    eq(E.runs.length, 1, 'la segunda vez usa el pantallazo ya pedido');
     eq(E.modals.length, 2);
     E.actions['budget.mail']({ id: '' });
     eq(E.modals.length, 2, 'sin id no abre nada');
     // Error del servidor: queda en el modal
-    var F = budEnv({ admin: false, mails: mails, fail: { aprobMailView: 'No encontré el correo de respaldo en Gmail <x>.' } });
+    var F = budEnv({ admin: false, mails: mails, fail: { aprobMailView: 'Aún no hay pantallazo de este correo <x>.' } });
     F.actions['budget.mail']({ id: 'SOL-new' });
-    includes(F.modals[0].body.innerHTML, 'No encontré el correo de respaldo en Gmail &lt;x&gt;.');
+    includes(F.modals[0].body.innerHTML, 'Aún no hay pantallazo de este correo &lt;x&gt;.');
     // Administrador en vista de equipo: el servidor manda el hilo → «Abrir en Gmail»
     var G = budEnv({ adminView: false, mails: mails, reply: { aprobMailView: Object.assign({}, R, { hiloUrl: MAIL + 'hilo' }) } });
     G.actions['budget.mail']({ id: 'SOL-new' });

@@ -588,12 +588,19 @@ messages from SENDER with 'Solicitud de compra' in the subject; dedupe by messag
 processed PR → ignore newer reminders (record nothing). GmailApp needs a new permission (read Gmail) — owner account only.
 Presupuesto.gs exposes `presSaveInLock_(year, id, data, base)` → {id} (same logic as budgetSave without mutate_), used by
 Aprobaciones. Code.gs: bundle_ adds `solicitudes` (admin only, via typeof aprobRead_), getAdminStatus adds `aprob: aprobStatus_()`.
-Backup mail for the whole team (2026-10-07, user decision): bundle_ adds `budgetMails` for EVERY member (via typeof aprobMailRefs_,
-never throws; [] when CONFIG.FEATURES.GMAIL is off): [{id:'SOL-…', lineId, pr, fecha ISO|'', recibido ISO}] of requests with estado
-'Vinculada'|'Nueva línea' and a Gmail ID (no amounts, requester or Gmail link). Public `aprobMailView(id)` (any real member, not
-'desconocido'; GMAIL feature on) → {id, pr, asunto, de, fecha ISO, cuerpo, hiloUrl ('' unless admin)}: reads the newest message of
-that linked request with GmailApp.getMessageById as the script owner (web app runs as USER_DEPLOYING), only if it comes from
-ARIBA_SENDER; cuerpo = plain body without the <mailto:…>/<https:…> action links (Aprobar/Denegar/Ver), max 30000 chars.
+Backup mail for the whole team (2026-10-07, user decisions): the team NEVER opens or reads Gonzalo's Gmail; they see a frozen
+SCREENSHOT ("pantallazo") of that one Ariba mail. Hidden sheet APROB_SNAP_SHEET 'Capturas de correo', one row per request:
+`ID | Gmail ID | Capturado | Asunto | De | Fecha | Captura` (the capture continues in G, H…: chunks of APROB_SNAP_PART 45000
+chars, each prefixed with "|" so Sheets never parses it; > APROB_SNAP_PARTS 10 chunks → plain-text <pre> capture). Taken with
+GmailApp only by the admin/trigger: in aprobLink / aprobNewLine (aprobSnapFor_, outside the lock, saved inside it) and in
+aprobScan / aprobScanTrigger (aprobSnapPending_: linked requests without capture, up to APROB_SNAP_BATCH 20 per run — covers
+requests linked before this version and failed captures). Only messages from ARIBA_SENDER; aprobSnapHtml_ keeps layout (tables,
+<style>, https images) and removes scripts, forms, frames, on* handlers and ALL links (Aprobar/Denegar/Ver carry the approver's
+token). Never breaks linking or scanning; GMAIL feature off → no capture. bundle_ adds `budgetMails` for EVERY member (via
+typeof aprobMailRefs_, never throws): [{id:'SOL-…', lineId, pr, fecha ISO|'', recibido ISO}] of requests 'Vinculada'|'Nueva
+línea' that have a capture (no amounts, requester or Gmail link). Public `aprobMailView(id)` (any real member, not
+'desconocido'; reads ONLY the sheets, never Gmail; works in safe mode and after the mail is deleted) → {id, pr, asunto, de,
+fecha ISO, capturado ISO, html, hiloUrl ('' unless admin)}.
 
 ### 13.3 Client v3
 - Routes: budget.approvals '#/presupuesto/solicitudes' (admin), gestion.plan '#/gestion/:pilar/plan', todo.page '#/tareas',
@@ -663,8 +670,10 @@ catalog, duplicate subtitles. Empty states: icon + one short line (or nothing). 
   no Solicitudes de compra, no Historial, no admin cards (only the toggle itself stays visible to S.me.admin).
 - Budget lines with a linked Ariba request: an eye icon ("Ver correo de respaldo") for the WHOLE team (2026-10-07). With
   "Ver como admin" (S.solicitudes lineId === line.id && hiloUrl) it opens the Gmail thread in a new tab; otherwise (team members,
-  or the admin in team view) the Gmail link would not work (the mail lives in Gonzalo's inbox), so the eye comes from
-  S.budgetMails and opens an in-app modal with the mail text (`budget.mail` → aprobMailView, cached per session).
+  or the admin in team view) never open that inbox: the eye comes from S.budgetMails and opens a modal (size xl) with the
+  saved screenshot (`budget.mail` → aprobMailView, cached per session), rendered in `<iframe data-snap sandbox="allow-same-origin"
+  srcdoc>` (no allow-scripts; own CSP: default-src 'none', img-src https: data:, inline styles) and fitted like an image
+  (budSnapFit: full height, scaled down when wider than the modal, pointer-events none).
 
 ### 14.5 Implementation notes (as built, 2026-10-03)
 - `mutateG_(fn, after?)`: optional `after(res)` runs outside the lock before reading the partial bundle (Drive folder hooks).
