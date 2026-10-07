@@ -1,5 +1,6 @@
 /* v3.1 · Presupuesto y Solicitudes (cliente): VPresupuesto.html + VAprobaciones.html (SPEC §14.4).
-   - Ojo «Ver correo de respaldo» en la tabla, las tarjetas móviles y el detalle de línea (sólo con «Ver como admin»).
+   - Ojo «Ver correo de respaldo» en la tabla, las tarjetas móviles y el detalle de línea. Con «Ver como admin» abre el
+     hilo en Gmail; para el resto del equipo (v3.7, S.budgetMails) abre el correo en la app (aprobMailView).
    - Menos texto: sin subtítulos explicativos, «Cómo funciona», «Todo al día…», etc. (los números y acciones siguen).
    Se evalúa el <script> real de cada vista con las primitivas reales de Core.html y stubs mínimos del navegador. */
 (function () {
@@ -53,11 +54,12 @@
     }, over || {});
   }
 
-  // Entorno de VPresupuesto: opts.admin (S.me.admin), opts.adminView (isAdminUI), opts.mobile, opts.sols
+  // Entorno de VPresupuesto: opts.admin (S.me.admin), opts.adminView (isAdminUI), opts.mobile, opts.sols, opts.mails
+  // (S.budgetMails), opts.reply / opts.fail (respuesta síncrona de run: {fn: valor} / {fn: mensaje de error})
   function budEnv(opts) {
     opts = opts || {};
     var lines = (opts.lines || LINES).map(function (l) { return Object.assign({}, l); });
-    var E = { views: {}, actions: {}, calls: [], toasts: [], drawers: [], gone: [] };
+    var E = { views: {}, actions: {}, calls: [], toasts: [], drawers: [], gone: [], runs: [], modals: [] };
     E.S = {
       me: { email: 'gvicencio@copec.cl', name: 'Gonzalo', admin: opts.admin !== false },
       users: [{ email: 'gvicencio@copec.cl', name: 'Gonzalo', color: 'emerald' }, { email: 'ibachler@copec.cl', name: 'Ina', color: 'violet' },
@@ -68,7 +70,7 @@
         { key: 'nat', area: 'Naturaleza', label: 'Naturaleza', icon: 'leaf', color: 'emerald' },
       ],
       years: [2026], year: 2026, budget: { '2026': lines }, projects: [], tasks: [], comments: [],
-      solicitudes: opts.sols || [], config: { sheetUrl: 'https://docs.google.com/spreadsheets/d/x' }, ui: {}, route: { name: 'budget.lines', params: {} },
+      solicitudes: opts.sols || [], budgetMails: opts.mails || [], config: { sheetUrl: 'https://docs.google.com/spreadsheets/d/x' }, ui: {}, route: { name: 'budget.lines', params: {} },
       loadedAt: new Date().toISOString(),
     };
     E.IDX = {
@@ -84,7 +86,16 @@
       window: opts.mobile ? { matchMedia: function () { return { matches: false }; } } : {},
       matchMedia: function () { return { matches: !opts.mobile }; },
       rerender: function () { E.rerenders = (E.rerenders || 0) + 1; }, go: function (h) { E.gone.push(h); },
-      run: function () { return { then: function () { return this; }, catch: function () { return this; }, finally: function () { return this; } }; },
+      run: function (fn) {
+        E.runs.push({ fn: fn, args: Array.prototype.slice.call(arguments, 1) });
+        var reply = opts.reply && fn in opts.reply, fail = opts.fail && fn in opts.fail;
+        var p = {
+          then: function (f) { if (reply && f) { reply = false; f(opts.reply[fn]); } return p; },
+          catch: function (f) { if (fail && f) { fail = false; f(new Error(opts.fail[fn])); } return p; },
+          finally: function () { return p; },
+        };
+        return p;
+      },
       mutate: function (fn, args, o) { E.calls.push({ fn: fn, args: args, opts: o || {} }); return { then: function () { return this; } }; },
       optimistic: function (local, fn, args, o) { local(); E.calls.push({ fn: fn, args: args, opts: o || {} }); return { then: function () { return this; } }; },
       toast: function (m, t) { E.toasts.push({ m: m, t: t }); },
@@ -93,7 +104,14 @@
       isAdminUI: function () { return !!E.S.me.admin && adminView; }, refreshIcons: function () {},
       myEmail: function () { return E.S.me.email; }, commentsPanel: function () { return '<div data-comments></div>'; },
       readForm: function () { return {}; }, confirmDialog: function () { return { then: function () {} }; }, promptDialog: function () { return { then: function () {} }; },
-      refreshData: function () { return { then: function () {} }; }, downloadXlsx: function () {}, openModal: function () { return { close: function () {} }; },
+      refreshData: function () { return { then: function () {} }; }, downloadXlsx: function () {},
+      openModal: function (o) {
+        var body = { innerHTML: '' };
+        var h = { opts: o, body: body, closed: false, close: function () { h.closed = true; },
+          el: { querySelector: function (q) { return q === '[data-bud-mail-body]' ? body : null; } } };
+        E.modals.push(h);
+        return h;
+      },
       errMsg: function (e) { return String(e && e.message || e); },
     };
     var f = new Function(STUBS.join(','), coreCode() + src('VPresupuesto') + '\nreturn function (n) { return eval(n); };');
@@ -153,7 +171,7 @@
     ok(!/<button[^>]*budget\.openSol[^>]*>(?:(?!<\/button>)[\s\S])*data-bud-mail/.test(d), 'sin <a> anidado en <button>');
   });
 
-  test('v31 presupuesto · «Ver como admin» apagado (o no admin): sin ojos, sin solicitudes en el detalle ni en el Resumen', function () {
+  test('v31 presupuesto · «Ver como admin» apagado (o no admin): sin bandeja de solicitudes; sin budgetMails, sin ojos', function () {
     var sols = [sol(), sol({ id: 'SOL-p', pr: 'PR9', estado: 'Pendiente', lineId: '' })];
     var on = budEnv({ sols: sols });
     eq(eyes(on.lines()), 1);
@@ -174,6 +192,74 @@
     includes(empty({}), 'Crear pestaña en Ajustes');
     ok(empty({ adminView: false }).indexOf('Crear pestaña en Ajustes') < 0, 'vista de equipo: sin atajo de administración');
     includes(empty({ adminView: false }), 'Falta la pestaña «Cuadre 2026»');
+  });
+
+  var TEAM_MAILS = [
+    { id: 'SOL-old', lineId: 'L-00000001', pr: 'PR100', fecha: '2026-08-01T10:00:00.000Z', recibido: '2026-08-01T12:00:00.000Z' },
+    { id: 'SOL-new', lineId: 'L-00000001', pr: 'PR200', fecha: '2026-09-15T10:00:00.000Z', recibido: '2026-09-15T12:00:00.000Z' },
+    { id: 'SOL-x"y', lineId: 'L-00000003', pr: 'PR3', fecha: '', recibido: '2026-07-01T12:00:00.000Z' },
+    { id: 'SOL-z', lineId: '', pr: 'PR4', fecha: '', recibido: '' },        // sin línea → sin ojo
+    { id: '', lineId: 'L-00000004', pr: 'PR5', fecha: '', recibido: '' },   // sin id → sin ojo
+  ];
+
+  test('v37 presupuesto · equipo: el ojo (S.budgetMails) abre el correo en la app, uno por línea, el más reciente', function () {
+    [budEnv({ admin: false, mails: TEAM_MAILS }), budEnv({ adminView: false, sols: [sol()], mails: TEAM_MAILS })].forEach(function (E, i) {
+      var tag = i ? 'administrador en vista de equipo' : 'miembro del equipo';
+      var html = E.lines();
+      eq(eyes(html), 2, tag + ': dos líneas con correo');
+      includes(html, '<button type="button" data-action="budget.mail" data-id="SOL-new" data-bud-mail="1" title="Ver correo de respaldo" aria-label="Ver correo de respaldo"', tag);
+      ok(html.indexOf('SOL-old') < 0, tag + ': un ojo por línea, el de la solicitud más reciente');
+      includes(html, 'data-id="SOL-x&quot;y"', tag + ': id escapado');
+      ok(html.indexOf(MAIL) < 0, tag + ': nunca el link de Gmail (el correo está en el buzón de Gonzalo)');
+      var row = html.split('<tr>').find(function (r) { return r.indexOf('data-id="L-00000001"') >= 0; });
+      ok(row && row.indexOf('data-action="budget.mail"') >= 0, tag + ': el ojo está en la fila de su línea');
+      ok(/data-bud-mail="1"[^>]*class="[^"]*text-zinc-400[^"]*hover:text-indigo-600/.test(html), tag + ': mismo estilo discreto');
+      var d = E.drawerHtml('L-00000001');
+      ok(d.indexOf('Solicitudes de compra') < 0 && d.indexOf('budget.openSol') < 0, tag + ': la bandeja sigue siendo de administración');
+      ok(E.summary().indexOf('Por registrar') < 0, tag + ': Resumen sin solicitudes');
+    });
+    var M = budEnv({ admin: false, mails: TEAM_MAILS, mobile: true }).lines();
+    eq(eyes(M), 2, 'tarjetas móviles');
+    includes(M, 'data-action="budget.mail" data-id="SOL-new"');
+    // Con «Ver como admin» todo sigue igual: link directo al hilo de Gmail
+    var A = budEnv({ sols: [sol()], mails: TEAM_MAILS }).lines();
+    eq(eyes(A), 1);
+    includes(A, '<a href="' + MAIL + 'uno" target="_blank" rel="noopener noreferrer" data-bud-mail="1"');
+    ok(A.indexOf('budget.mail') < 0, 'administrador: sin visor');
+  });
+
+  test('v37 presupuesto · equipo: «Ver correo» pide aprobMailView una vez y muestra el texto escapado (o el error)', function () {
+    var mails = [TEAM_MAILS[1]];
+    var R = { id: 'SOL-new', pr: 'PR200', asunto: 'Solicitud de compra <b>PR200</b>', de: 'Ariba <buyer@ariba.com>', fecha: '2026-09-15T13:00:00.000Z',
+      cuerpo: 'Importe total\n<script>alert(1)</script>', hiloUrl: '' };
+    var E = budEnv({ admin: false, mails: mails, reply: { aprobMailView: R } });
+    E.lines();
+    ok(typeof E.actions['budget.mail'] === 'function', 'acción registrada');
+    E.actions['budget.mail']({ id: 'SOL-new' });
+    deepEq(E.runs, [{ fn: 'aprobMailView', args: ['SOL-new'] }]);
+    eq(E.modals.length, 1);
+    eq(E.modals[0].opts.title, 'Correo de respaldo · PR200');
+    var h = E.modals[0].body.innerHTML;
+    includes(h, 'Solicitud de compra &lt;b&gt;PR200&lt;/b&gt;', 'asunto escapado');
+    includes(h, 'Ariba &lt;buyer@ariba.com&gt;', 'remitente escapado');
+    includes(h, 'Importe total\n&lt;script&gt;alert(1)&lt;/script&gt;', 'cuerpo escapado, con sus saltos de línea');
+    ok(h.indexOf('<script>') < 0, 'nada se inyecta');
+    includes(h, 'whitespace-pre-wrap');
+    ok(h.indexOf('Abrir en Gmail') < 0, 'sin link de Gmail para el equipo');
+    E.actions['budget.mail']({ id: 'SOL-new' });
+    eq(E.runs.length, 1, 'la segunda vez usa el correo ya leído');
+    eq(E.modals.length, 2);
+    E.actions['budget.mail']({ id: '' });
+    eq(E.modals.length, 2, 'sin id no abre nada');
+    // Error del servidor: queda en el modal
+    var F = budEnv({ admin: false, mails: mails, fail: { aprobMailView: 'No encontré el correo de respaldo en Gmail <x>.' } });
+    F.actions['budget.mail']({ id: 'SOL-new' });
+    includes(F.modals[0].body.innerHTML, 'No encontré el correo de respaldo en Gmail &lt;x&gt;.');
+    // Administrador en vista de equipo: el servidor manda el hilo → «Abrir en Gmail»
+    var G = budEnv({ adminView: false, mails: mails, reply: { aprobMailView: Object.assign({}, R, { hiloUrl: MAIL + 'hilo' }) } });
+    G.actions['budget.mail']({ id: 'SOL-new' });
+    includes(G.modals[0].body.innerHTML, 'href="' + MAIL + 'hilo"');
+    includes(G.modals[0].body.innerHTML, 'Abrir en Gmail');
   });
 
   test('v31 presupuesto · tarjetas móviles: ojo junto a «Abrir detalle», menos insignias', function () {

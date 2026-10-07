@@ -8,7 +8,8 @@
 /* ---------- Constantes del módulo ---------- */
 // drafts[id]: sólo los campos cambiados en el detalle · base[id]: {form, line} valores de partida de esos campos
 // (form = lo que mostraba el formulario, line = valor en la planilla)
-const BUD = { timer: null, drafts: {}, base: {}, mq: null, ptr: false, afterPtr: null };
+// mails[SOL-…]: correo de respaldo ya leído con aprobMailView (no cambia: se pide una vez por sesión)
+const BUD = { timer: null, drafts: {}, base: {}, mq: null, ptr: false, afterPtr: null, mails: {} };
 const BUD_SHORT = { cc: 'CC', ec: 'EC', nat: 'NAT' };
 const BUD_CLASES = ['POA', 'Nuevo', 'Fuera de POA'];
 const BUD_ACCION = ['Pagar/OC ya', 'Definir OC'];
@@ -664,27 +665,62 @@ function budSolsOfLine(lineId) {
   return budSols().filter(x => budSolLinked(x) && x.lineId === lineId)
     .sort((a, b) => { const ka = budSolKey(a), kb = budSolKey(b); return ka < kb ? 1 : ka > kb ? -1 : 0; });
 }
-/* ---------- Correo de respaldo: ojo que abre el hilo de Gmail (sólo administradores: el correo es de Gonzalo) ---------- */
-// lineId → URL (http/https) del hilo de la solicitud más reciente de esa línea; se arma una vez por render
+/* ---------- Correo de respaldo: ojo en cada línea con una solicitud de Ariba registrada (todo el equipo) ----------
+   El correo está en el buzón de Gonzalo: con «Ver como admin» el ojo abre el hilo en Gmail; para el resto del equipo
+   (y en la vista de equipo) ese link no sirve, así que el ojo abre el correo dentro de la app (aprobMailView). */
+// Refs del bundle para todo el equipo: [{id: SOL-…, lineId, pr, fecha, recibido}] (sólo solicitudes registradas)
+function budMailRefs() { return S && Array.isArray(S.budgetMails) ? S.budgetMails : []; }
+// lineId → {url} (hilo de Gmail, vista de administrador) o {id} (SOL-… para el visor) de la solicitud más reciente de
+// esa línea; se arma una vez por render
 function budMailMap() {
-  const url = new Map(), key = new Map();
-  budSols().forEach(x => {
-    if (!budSolLinked(x)) return;
-    const u = safeUrl(x.hiloUrl);
-    if (!u) return;
+  const admin = budIsAdmin();
+  const map = new Map(), key = new Map();
+  (admin ? budSols().filter(budSolLinked) : budMailRefs()).forEach(x => {
+    const ref = admin ? { url: safeUrl(x.hiloUrl) } : { id: String(x.id || '') };
+    if (!x.lineId || !(ref.url || ref.id)) return;
     const k = budSolKey(x);
-    if (!url.has(x.lineId) || k > key.get(x.lineId)) { url.set(x.lineId, u); key.set(x.lineId, k); }
+    if (!map.has(x.lineId) || k > key.get(x.lineId)) { map.set(x.lineId, ref); key.set(x.lineId, k); }
   });
-  return url;
+  return map;
 }
-function budMailOf(lineId) { return budMailMap().get(lineId) || ''; }
-// Link externo (nueva pestaña); sin URL segura no se dibuja nada
-function budEye(url, title, cls) {
-  const u = safeUrl(url);
-  if (!u) return '';
+function budMailOf(lineId) { return budMailMap().get(lineId) || null; }
+// ref = URL o {url} → link externo (nueva pestaña) · {id} → botón que abre el visor · sin ninguno, nada
+function budEye(ref, title, cls) {
+  const r = typeof ref === 'string' ? { url: ref } : (ref || {});
+  const u = safeUrl(r.url);
   const t = title || 'Ver correo de respaldo';
-  return '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer" data-bud-mail="1" title="' + esc(t) + '" aria-label="' + esc(t) + '" class="' + BUD_EYE + ' ' + (cls || 'size-7') + '">' +
-    icon('eye', 'size-4 shrink-0') + '</a>';
+  const a = ' data-bud-mail="1" title="' + esc(t) + '" aria-label="' + esc(t) + '" class="' + BUD_EYE + ' ' + (cls || 'size-7') + '">' + icon('eye', 'size-4 shrink-0');
+  if (u) return '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer"' + a + '</a>';
+  if (r.id) return '<button type="button" data-action="budget.mail" data-id="' + esc(r.id) + '"' + a + '</button>';
+  return '';
+}
+// Visor del correo (equipo): el servidor lo lee del buzón de Gonzalo, sin los links de Aprobar / Denegar
+function budMailHtml(m) {
+  const meta = [m.fecha ? fmtDateTime(m.fecha) : '', m.de].filter(Boolean).join(' · ');
+  return (m.asunto ? '<h4 class="text-sm font-semibold leading-snug text-zinc-900 dark:text-white">' + esc(m.asunto) + '</h4>' : '') +
+    (meta ? '<p class="mt-1 text-xs ' + BUD_MUTED + '">' + esc(meta) + '</p>' : '') +
+    '<div class="mt-4 whitespace-pre-wrap break-words rounded-lg border border-zinc-200/80 bg-zinc-50/70 px-4 py-3 text-sm leading-relaxed text-zinc-800 dark:border-zinc-800 dark:bg-zinc-800/30 dark:text-zinc-200">' +
+    esc(m.cuerpo || 'El correo no tiene texto.') + '</div>';
+}
+function budOpenMail(id) {
+  if (!id) return;
+  const ref = budMailRefs().find(x => x.id === id) || {};
+  const m = openModal({
+    size: 'lg', autofocus: false, title: 'Correo de respaldo' + (ref.pr ? ' · ' + ref.pr : ''),
+    iconHtml: '<div class="grid size-9 shrink-0 place-items-center rounded-full bg-indigo-100 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300">' + icon('mail', 'size-4') + '</div>',
+    body: '<div data-bud-mail-body><p class="flex items-center gap-2 text-sm ' + BUD_MUTED + '">' + icon('loader-circle', 'size-4 shrink-0 animate-spin') + 'Cargando correo…</p></div>',
+  });
+  const fill = html => {
+    const el = m && m.el && !m.closed ? m.el.querySelector('[data-bud-mail-body]') : null;
+    if (el) { el.innerHTML = html; refreshIcons(el); }
+  };
+  (BUD.mails[id] ? Promise.resolve(BUD.mails[id]) : run('aprobMailView', id))
+    .then(r => {
+      BUD.mails[id] = r;
+      const gmail = safeUrl(r && r.hiloUrl);
+      fill(budMailHtml(r || {}) + (gmail ? '<div class="mt-4 flex justify-end">' + btn({ label: 'Abrir en Gmail', icon: 'external-link', href: gmail, external: true, size: 'sm' }) + '</div>' : ''));
+    })
+    .catch(e => fill('<p class="flex items-start gap-2 text-sm text-red-600 dark:text-red-400">' + icon('circle-alert', 'mt-0.5 size-4 shrink-0') + '<span>' + esc(errMsg(e)) + '</span></p>'));
 }
 function budSolDate(x) {
   const v = x.fecha || x.recibido;
@@ -1080,6 +1116,7 @@ action('budget.openSol', d => {
   else { closeDrawer(); go('#/presupuesto/solicitudes'); }
 });
 action('budget.solInbox', () => { closeDrawer(); go('#/presupuesto/solicitudes'); });
+action('budget.mail', d => budOpenMail(d.id));
 action('budget.openProject', d => {
   if (typeof openProject === 'function') openProject(d.id);
   else { const p = IDX.project.get(d.id); go(p ? '#/gestion/' + p.pilar : '#/gestion'); }

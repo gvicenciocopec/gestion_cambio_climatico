@@ -11,8 +11,9 @@
  * - Un mismo PR aún 'Pendiente' se actualiza con el correo más nuevo; un PR ya procesado ignora recordatorios.
  * - Un correo que no se puede leer bien queda igual registrado (lectura 'parcial', con su asunto).
  * API pública (todas sólo admin): aprobScan, aprobLink, aprobNewLine, aprobDiscard, aprobReset, aprobInstall,
- * aprobScanTrigger (activador). Internas: aprobRead_ (bundle), aprobStatus_ (Ajustes, exacto), aprobStatusFast_ (bundle,
- * sin activadores), aprobParse_ (pura, probada).
+ * aprobScanTrigger (activador). Para todo el equipo: aprobMailView (sólo lectura del correo de respaldo de una solicitud
+ * ya registrada en una línea: el ojo del presupuesto). Internas: aprobRead_ (bundle), aprobMailRefs_ (bundle, todo el
+ * equipo), aprobStatus_ (Ajustes, exacto), aprobStatusFast_ (bundle, sin activadores), aprobParse_ (pura, probada).
  */
 
 const APROB_HEADERS = [
@@ -197,6 +198,83 @@ function aprobScanTrigger(e) {
     console.error('aprobScanTrigger: ' + msg);
     return { error: msg };
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Correo de respaldo para todo el equipo (ojo del presupuesto)        */
+/* ------------------------------------------------------------------ */
+
+// El hilo vive en el Gmail del dueño del script (la app corre como él): el link de Gmail sólo le sirve a él. Al resto
+// del equipo se le muestra el correo dentro de la app. Sólo solicitudes ya registradas en una línea ('Vinculada' /
+// 'Nueva línea') y sólo mensajes del remitente de Ariba: nunca otro correo del buzón.
+// → {id, pr, asunto, de, fecha ISO, cuerpo (texto plano, sin links de acción), hiloUrl ('' salvo administradores)}
+function aprobMailView(id) {
+  assertMember_();
+  if (!isMember_(me_())) throw new Error('Entra con tu cuenta del equipo para ver el correo de respaldo.');
+  aprobAssertGmail_();
+  const sid = str_(id);
+  const sh = sid ? ss_().getSheetByName(aprobSheetName_()) : null;
+  const x = sh && sh.getLastRow() >= 2 ? aprobRecs_(aprobTable_(sh)).find(r => r.rec.id === sid) : null;
+  if (!x || !aprobHasMail_(x.rec)) throw new Error('Esta línea no tiene un correo de respaldo disponible.');
+  const rec = x.rec;
+  const sender = aprobSender_();
+  let msg = null;
+  rec.gmailIds.some(gid => { // el más nuevo primero
+    try {
+      const m = GmailApp.getMessageById(gid);
+      if (m && str_(m.getFrom()).toLowerCase().indexOf(sender) >= 0) msg = m;
+    } catch (e) {
+      console.warn('aprobMailView: no se pudo leer ' + gid + ': ' + aprobErr_(e));
+    }
+    return !!msg;
+  });
+  if (!msg) throw new Error('No encontré el correo de respaldo en Gmail (puede que se haya eliminado).');
+  let body = '';
+  try { body = String(msg.getPlainBody() || ''); } catch (e) { body = ''; }
+  if (!body.trim()) {
+    try { body = aprobHtmlText_(msg.getBody()); } catch (e) { body = ''; }
+  }
+  let asunto = rec.asunto, de = '', fecha = rec.recibido;
+  try { asunto = aprobOneLine_(msg.getSubject()) || asunto; } catch (e) { /* queda el asunto registrado */ }
+  try { de = aprobOneLine_(msg.getFrom()); } catch (e) { de = ''; }
+  try { fecha = aprobIso_(msg.getDate()) || fecha; } catch (e) { /* queda la fecha registrada */ }
+  return {
+    id: rec.id, pr: rec.pr, asunto: asunto, de: de, fecha: fecha, cuerpo: aprobMailText_(body),
+    hiloUrl: isAdmin_() && /^https:\/\//i.test(rec.hiloUrl) ? rec.hiloUrl : '',
+  };
+}
+
+// Refs del ojo del presupuesto para TODO el equipo (bundle `budgetMails`): [{id, lineId, pr, fecha ISO|'', recibido}]
+// de las solicitudes registradas en una línea, más recientes primero. Sin montos, solicitante ni link de Gmail.
+// sols: las Sol que el bundle ya leyó (administrador), para no releer la hoja.
+function aprobMailRefs_(ss, sols) {
+  if (!featureOn_('GMAIL')) return []; // modo seguro: el equipo no podría abrir el correo
+  let list = sols;
+  if (!Array.isArray(list)) {
+    const sh = (ss || ss_()).getSheetByName(aprobSheetName_());
+    if (!sh || sh.getLastRow() < 2) return [];
+    const t = aprobTable_(sh);
+    if (t.idx.ID < 0) return [];
+    list = aprobRecs_(t).filter(x => aprobHasMail_(x.rec)).map(x => aprobSol_(x.rec));
+  }
+  return list.filter(s => s && s.gmailId && s.lineId && (s.estado === 'Vinculada' || s.estado === 'Nueva línea'))
+    .map(s => ({ id: s.id, lineId: s.lineId, pr: s.pr, fecha: s.fecha || '', recibido: s.recibido || '' }))
+    .sort((a, b) => (a.recibido < b.recibido ? 1 : a.recibido > b.recibido ? -1 : 0)); // como aprobRead_
+}
+
+function aprobHasMail_(rec) {
+  return !!(rec && rec.gmailIds.length && rec.lineId && (rec.estado === 'Vinculada' || rec.estado === 'Nueva línea'));
+}
+
+// Cuerpo para mostrar: sin los links de Aprobar / Denegar / Ver (<mailto:…>, <https://…>), sin espacios de sobra.
+function aprobMailText_(s) {
+  const t = String(s || '').replace(/\r\n?/g, '\n')
+    .replace(/[ \t]*<\s*(mailto|https?):[^>]*>/gi, '')
+    .replace(/[ \t]*\bmailto:\S+/gi, '')
+    .replace(/[ \t\u00a0]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return t.length > 30000 ? t.slice(0, 30000) + '\n…' : t;
 }
 
 /* ------------------------------------------------------------------ */

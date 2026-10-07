@@ -21,7 +21,7 @@ SPEC_PUBLIC = {
     'Code.gs': {'doGet', 'include', 'bootstrap', 'getHistory', 'getAdminStatus', 'setAppUrl', 'CONFIG'},
     'Presupuesto.gs': {'budgetSave', 'budgetDelete', 'budgetCreateYear', 'recalcAll'},
     'Gestion.gs': {'gSave', 'gDelete', 'taskComplete', 'taskReopen', 'taskReorder', 'tasksSetPrivacy', 'importCascadeProjects', 'commentAdd', 'commentDelete', 'G_HEADERS'},
-    'Aprobaciones.gs': {'aprobScan', 'aprobLink', 'aprobNewLine', 'aprobDiscard', 'aprobReset', 'aprobInstall', 'aprobScanTrigger'},
+    'Aprobaciones.gs': {'aprobScan', 'aprobLink', 'aprobNewLine', 'aprobDiscard', 'aprobReset', 'aprobInstall', 'aprobScanTrigger', 'aprobMailView'},
     'Notificaciones.gs': {'installTrigger', 'notifDaily', 'sendTestDigest'},
     'Asistente.gs': {'ask'},
     'WhatsApp.gs': set(),

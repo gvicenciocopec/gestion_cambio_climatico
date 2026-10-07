@@ -588,6 +588,12 @@ messages from SENDER with 'Solicitud de compra' in the subject; dedupe by messag
 processed PR → ignore newer reminders (record nothing). GmailApp needs a new permission (read Gmail) — owner account only.
 Presupuesto.gs exposes `presSaveInLock_(year, id, data, base)` → {id} (same logic as budgetSave without mutate_), used by
 Aprobaciones. Code.gs: bundle_ adds `solicitudes` (admin only, via typeof aprobRead_), getAdminStatus adds `aprob: aprobStatus_()`.
+Backup mail for the whole team (2026-10-07, user decision): bundle_ adds `budgetMails` for EVERY member (via typeof aprobMailRefs_,
+never throws; [] when CONFIG.FEATURES.GMAIL is off): [{id:'SOL-…', lineId, pr, fecha ISO|'', recibido ISO}] of requests with estado
+'Vinculada'|'Nueva línea' and a Gmail ID (no amounts, requester or Gmail link). Public `aprobMailView(id)` (any real member, not
+'desconocido'; GMAIL feature on) → {id, pr, asunto, de, fecha ISO, cuerpo, hiloUrl ('' unless admin)}: reads the newest message of
+that linked request with GmailApp.getMessageById as the script owner (web app runs as USER_DEPLOYING), only if it comes from
+ARIBA_SENDER; cuerpo = plain body without the <mailto:…>/<https:…> action links (Aprobar/Denegar/Ver), max 30000 chars.
 
 ### 13.3 Client v3
 - Routes: budget.approvals '#/presupuesto/solicitudes' (admin), gestion.plan '#/gestion/:pilar/plan', todo.page '#/tareas',
@@ -655,8 +661,10 @@ catalog, duplicate subtitles. Empty states: icon + one short line (or nothing). 
   the panel open (TodoPanel exposes `todoOpenSheet()` for mobile). The 'todo.page' view is removed.
 - "Ver como admin" (Ajustes, only for real admins): `setAdminView(on)`; `isAdminUI()` is false when off → no Vista general,
   no Solicitudes de compra, no Historial, no admin cards (only the toggle itself stays visible to S.me.admin).
-- Budget lines with a linked Ariba request (S.solicitudes lineId === line.id && hiloUrl): an eye icon ("Ver correo") that
-  opens the Gmail thread in a new tab (admin only, since the mail lives in Gonzalo's inbox).
+- Budget lines with a linked Ariba request: an eye icon ("Ver correo de respaldo") for the WHOLE team (2026-10-07). With
+  "Ver como admin" (S.solicitudes lineId === line.id && hiloUrl) it opens the Gmail thread in a new tab; otherwise (team members,
+  or the admin in team view) the Gmail link would not work (the mail lives in Gonzalo's inbox), so the eye comes from
+  S.budgetMails and opens an in-app modal with the mail text (`budget.mail` → aprobMailView, cached per session).
 
 ### 14.5 Implementation notes (as built, 2026-10-03)
 - `mutateG_(fn, after?)`: optional `after(res)` runs outside the lock before reading the partial bundle (Drive folder hooks).

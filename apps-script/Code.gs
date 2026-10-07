@@ -7,7 +7,7 @@
  *   Gestion.gs         pestaña oculta "Gestión" (proyectos, tareas, comentarios, catálogo Cascade)
  *   Drive.gs           carpeta de Drive por proyecto (unidad compartida del equipo)
  *   Notificaciones.gs  aviso por correo cuando una tarea vence (una sola vez, revisión diaria ~08:00)
- *   Aprobaciones.gs    solicitudes de compra de Ariba (sólo administradores)
+ *   Aprobaciones.gs    solicitudes de compra de Ariba (sólo administradores; el correo de respaldo, para todo el equipo)
  *   Asistente.gs       buscador + Gemini (anti-alucinación)
  *   Setup.gs           configuración inicial, menú de la hoja y catálogo Cascade inicial
  * Detalle técnico: dev/SPEC.md
@@ -182,6 +182,7 @@ function bundle_() {
   const me = me_();
   const admin = isAdmin_();
   const g = bundleGestionData_(ss, me);
+  const solicitudes = bundleSolicitudes_(ss, warnings); // sólo administradores; [] para el resto
   const year = new Date().getFullYear();
   return {
     me: { email: me, name: userName_(me), admin: admin },
@@ -194,7 +195,8 @@ function bundle_() {
     tasks: g.tasks,
     cascade: g.cascade,
     comments: g.comments,
-    solicitudes: bundleSolicitudes_(ss, warnings), // sólo administradores; [] para el resto
+    solicitudes: solicitudes,
+    budgetMails: bundleBudgetMails_(ss, admin ? solicitudes : null), // todo el equipo: ojo «Ver correo de respaldo»
     config: {
       drive: typeof driveConfigured_ === 'function' ? !!driveConfigured_() : false, // ¿hay carpeta raíz de Drive?
       features: { drive: featureOn_('DRIVE'), gmail: featureOn_('GMAIL') }, // modo seguro (CONFIG.FEATURES)
@@ -244,6 +246,18 @@ function bundleSolicitudes_(ss, warnings) {
   } catch (e) {
     console.error('bundle_: no se pudieron leer las solicitudes de compra: ' + (e && e.message));
     warnings.push('No se pudieron leer las solicitudes de compra: ' + ((e && e.message) || e));
+    return [];
+  }
+}
+
+// Correo de respaldo de las líneas del presupuesto (SPEC §13.2), para todo el equipo: sólo referencias (id de la
+// solicitud, línea, PR, fecha); el correo se lee con aprobMailView. Nunca bota el bundle.
+function bundleBudgetMails_(ss, sols) {
+  if (typeof aprobMailRefs_ !== 'function') return [];
+  try {
+    return aprobMailRefs_(ss, sols);
+  } catch (e) {
+    console.error('bundle_: no se pudieron leer los correos de respaldo: ' + (e && e.message));
     return [];
   }
 }
