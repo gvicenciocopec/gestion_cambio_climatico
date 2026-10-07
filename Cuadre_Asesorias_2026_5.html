@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Cuadre asesorías 2026</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--navy:#1F3A5F;--teal:#0E7C7B;--green:#1E7A46;--red:#C0392B;--amber:#B7791F;
+--ink:#1c2429;--mut:#6b7780;--line:#e3e8eb;--bg:#f6f8f8;--card:#ffffff;}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;color:var(--ink);background:var(--bg);}
+.wrap{max-width:1220px;margin:0 auto;padding:22px 18px 60px}
+header h1{font-size:20px;margin:0 0 4px;color:var(--navy);letter-spacing:-.2px}
+header p{margin:0;color:var(--mut);font-size:13px;max-width:790px;line-height:1.45}
+.cards{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:18px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 13px}
+.card .lab{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut);font-weight:600}
+.card .val{font-size:18px;font-weight:700;margin-top:5px;color:var(--navy);font-variant-numeric:tabular-nums}
+.card.alert .val{color:var(--red)} .card.commit .val{color:var(--teal)}
+.tabs{display:flex;gap:6px;margin:4px 0 16px}
+.tab{border:1px solid var(--line);background:#fff;color:var(--mut);border-radius:9px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer}
+.tab.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0 14px}
+.flab{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);font-weight:700}
+.chipf{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:999px;padding:6px 13px;font-size:12.5px;cursor:pointer;font-weight:600}
+.chipf.on{background:var(--navy);color:#fff;border-color:var(--navy)}
+.spacer{flex:1}
+.btn{border:0;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;color:#fff}
+.btn.add{background:var(--green)} .btn.x{background:var(--teal)}
+.panel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px;display:none}
+.panel.show{display:block}
+.panel h3{margin:0 0 10px;font-size:13px;color:var(--navy)}
+.frm{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr 1fr auto;gap:8px;align-items:end}
+.frm label{font-size:10.5px;color:var(--mut);font-weight:600;display:block;margin-bottom:3px}
+.frm input,.frm select{width:100%;border:1px solid var(--line);border-radius:7px;padding:7px;font-size:12.5px;font-family:inherit}
+.tablewrap{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+thead th{background:var(--navy);color:#fff;font-weight:600;text-align:left;padding:10px 10px;position:sticky;top:0;font-size:11.5px;white-space:nowrap}
+th.num,td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+th.sortable{cursor:pointer;user-select:none}.cr{font-size:10px;margin-left:2px}
+tbody td{padding:9px 10px;border-top:1px solid var(--line);vertical-align:middle}
+tbody tr:hover{background:#fafcfc}
+.proj{font-weight:600;color:var(--ink);max-width:280px}
+.nota{display:block;font-size:10.5px;color:var(--mut);margin-top:2px;font-weight:400;max-width:280px;line-height:1.3}
+.band{display:inline-block;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px}
+.band.cc{background:#e2efff;color:#1c4e80}.band.ec{background:#e9f6ec;color:#1E7A46}.band.nat{background:#eef0d9;color:#6b6a1a}
+.cl{font-size:10px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+.pago-in{width:96px;border:1px solid var(--line);border-radius:7px;padding:5px 7px;font-size:12px;text-align:right;font-variant-numeric:tabular-nums;font-family:inherit}
+.oc{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.oc button{border:0;background:#fff;padding:5px 11px;font-size:12px;cursor:pointer;font-weight:700;color:var(--mut)}
+.oc button.si.on{background:var(--green);color:#fff}.oc button.no.on{background:var(--red);color:#fff}
+.st{font-size:11px;font-weight:600;white-space:nowrap}
+.st.norun{color:var(--mut)}.st.exec{color:var(--green)}.st.curso{color:var(--amber)}.st.por{color:var(--navy)}
+.al{font-size:11px;font-weight:700;padding:3px 8px;border-radius:7px;white-space:nowrap;display:inline-block}
+.al.ya{background:#f8d7da;color:var(--red)}.al.def{background:#fcefd6;color:var(--amber)}
+.al.ok{background:#e6f4ec;color:var(--green)}.al.dash{color:var(--mut);background:transparent}
+.del{border:1px solid var(--line);background:#fff;color:var(--red);border-radius:7px;width:26px;height:26px;cursor:pointer;font-size:13px;font-weight:700;line-height:1}
+.del:hover{background:#f8d7da}
+tfoot td{padding:11px 10px;border-top:2px solid var(--navy);font-weight:700;background:#eef4f4;font-variant-numeric:tabular-nums}
+.legend{font-size:11.5px;color:var(--mut);margin:14px 2px;line-height:1.6}
+.legend b{color:var(--ink)}
+.vizgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.vcard{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+.vcard.full{grid-column:1 / -1}
+.vcard h3{margin:0 0 4px;font-size:13px;color:var(--navy)}
+.vcard .sub{font-size:11.5px;color:var(--mut);margin:0 0 12px}
+.track{display:flex;height:26px;border-radius:7px;overflow:hidden;background:#eef1f2;margin:10px 0}
+.seg{height:100%}
+.vrow{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;margin:6px 0}
+.vrow .rt{font-weight:700;font-variant-numeric:tabular-nums}
+.dot{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:7px;vertical-align:middle}
+.callout{background:#f8d7da;color:var(--red);border-radius:9px;padding:10px 12px;font-size:12.5px;font-weight:600;margin-top:12px}
+.callout.good{background:#e6f4ec;color:var(--green)}
+.arow{margin:11px 0}
+.albl{font-size:11.5px;font-weight:700;color:var(--ink);margin-bottom:4px;display:flex;justify-content:space-between}
+.albl .am{font-weight:600;color:var(--mut);font-variant-numeric:tabular-nums}
+.donutwrap{display:flex;gap:26px;align-items:center;flex-wrap:wrap}
+.dlegend{flex:1;min-width:240px}
+@media(max-width:880px){.cards{grid-template-columns:repeat(2,1fr)}.nota,.proj{max-width:none}.frm{grid-template-columns:1fr 1fr}.vizgrid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+<h1>Cuadre de asesorías 2026 · Asuntos Corporativos</h1>
+<p>Marca <b>OC sí/no</b>, ordena por monto en los encabezados, filtra por OC y revisa la pestaña <b>Visualización</b> para ver cuánto está comprometido con OC y cuánto falta sin OC.</p>
+</header>
+
+<div class="cards" id="cards"></div>
+
+<div class="tabs">
+<button class="tab on" id="tb_tabla" onclick="setTab('tabla')">Tabla</button>
+<button class="tab" id="tb_viz" onclick="setTab('viz')">Visualización</button>
+</div>
+
+<div id="tab_tabla">
+<div class="bar" id="filters"></div>
+<div class="bar">
+<span id="saveInfo" class="flab" style="text-transform:none;letter-spacing:0;font-weight:600;color:var(--mut)"></span>
+<span class="spacer"></span>
+<button class="chipf" onclick="resetData()" style="color:var(--red);border-color:#f3c8c8">Restablecer datos originales</button>
+<button class="btn add" onclick="togglePanel()">+ Agregar asesoría</button>
+<button class="btn x" onclick="dlXlsx()">Descargar Excel</button>
+</div>
+<div class="panel" id="panel">
+<h3>Nueva asesoría</h3>
+<div class="frm">
+<div><label>Proyecto</label><input id="f_na" type="text" placeholder="Nombre de la asesoría"></div>
+<div><label>Área</label><select id="f_ar"><option>Cambio Climatico</option><option>Economia Circular</option><option>Naturaleza</option></select></div>
+<div><label>Clasificación</label><select id="f_cl"><option>POA</option><option>Nuevo</option><option>Fuera de POA</option></select></div>
+<div><label>Presup. original</label><input id="f_po" type="text" placeholder="0"></div>
+<div><label>Final proyectado</label><input id="f_pf" type="text" placeholder="0"></div>
+<div><label>Pagado</label><input id="f_pg" type="text" placeholder="0"></div>
+<div><button class="btn add" onclick="addRow()">Agregar</button></div>
+</div>
+</div>
+<div class="tablewrap">
+<table>
+<thead><tr>
+<th>Proyecto</th><th>Área</th><th>Clasif.</th>
+<th class="num sortable" onclick="setSort('po')">Presup. original<span class="cr" id="cO"></span></th>
+<th class="num sortable" onclick="setSort('pf')">Final proyectado<span class="cr" id="cF"></span></th>
+<th class="num sortable" onclick="setSort('pg')">Pagado<span class="cr" id="cP"></span></th>
+<th class="num sortable" onclick="setSort('pend')">Pendiente<span class="cr" id="cN"></span></th>
+<th>OC</th><th>Estado</th><th>Alerta</th><th></th>
+</tr></thead>
+<tbody id="tb"></tbody>
+<tfoot id="tf"></tfoot>
+</table>
+</div>
+<div class="legend">
+<b>Estado:</b> Ejecutado = pagado 100% · En curso = tiene OC o pago parcial sin llegar al 100% · Por ejecutar = sin OC y sin pago · No se realizará = monto final 0.<br>
+<b>Notas:</b> sin <b>Donación FK</b>; <b>EMOAC</b> a <b>$14M</b>; filas <b>[TENTATIVO]</b> = match de pago por confirmar; gastos <b>fuera de POA</b> ya pagados, sólo para informar.
+</div>
+</div>
+
+<div id="tab_viz" style="display:none"></div>
+
+</div>
+
+<script>
+const DEFAULT_DATA = [{"area": "Cambio Climatico", "proj": "GV - IREC Flux (compra certificados renovables)", "clas": "POA", "po": 53383608, "pf": 36608000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Cambio Climatico", "proj": "GV - EDS Carbono Neutral 2024", "clas": "POA", "po": 10647105, "pf": 0, "pg": 0, "tent": false, "nota": "No se realiza: ahorro liberado", "oc": ""}, {"area": "Cambio Climatico", "proj": "GV - Emisiones: certificacion Huella Carbono + Huella Chile", "clas": "POA", "po": 6044813, "pf": 4612000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Cambio Climatico", "proj": "GV - Auditoria interna ISO 50001", "clas": "POA", "po": 1817120, "pf": 1817120, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Cambio Climatico", "proj": "GV - Emisiones: certificacion IREC", "clas": "POA", "po": 16387790, "pf": 16387790, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Cambio Climatico", "proj": "GV - Emisiones: mi huella (Disney)", "clas": "POA", "po": 14342159, "pf": 14342159, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Cambio Climatico", "proj": "GV - Recertificacion ISO 50001", "clas": "POA", "po": 4955783, "pf": 4955783, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Cambio Climatico", "proj": "Analisis prevencion (Huella)", "clas": "Nuevo", "po": 0, "pf": 7120000, "pg": 2145975, "tent": false, "nota": "", "oc": ""}, {"area": "Cambio Climatico", "proj": "Estudio prevencion Paneles solares (Huella)", "clas": "Nuevo", "po": 0, "pf": 3500000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Cambio Climatico", "proj": "Apoyo SGE - EMOAC (Huella)", "clas": "Nuevo", "po": 0, "pf": 14000000, "pg": 0, "tent": false, "nota": "DESVIACION: plan tenia $10M, monto final $14M.", "oc": ""}, {"area": "Cambio Climatico", "proj": "Extension Manuia", "clas": "Fuera de POA", "po": 0, "pf": 4212621, "pg": 4212621, "tent": false, "nota": "5602585-0007. Ejecutado fuera de POA.", "oc": "Si"}, {"area": "Cambio Climatico", "proj": "Zizcar", "clas": "Fuera de POA", "po": 0, "pf": 3500000, "pg": 3500000, "tent": false, "nota": "5602585-0020. Ejecutado fuera de POA.", "oc": "Si"}, {"area": "Cambio Climatico", "proj": "CTX Membership SME", "clas": "Fuera de POA", "po": 0, "pf": 509546, "pg": 509546, "tent": false, "nota": "5602585-0004. Ejecutado fuera de POA.", "oc": "Si"}, {"area": "Economia Circular", "proj": "Asesoria Residuos plantas", "clas": "Nuevo", "po": 0, "pf": 20000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Economia Circular", "proj": "Activacion Mugs", "clas": "Nuevo", "po": 0, "pf": 2000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Economia Circular", "proj": "Kyklos red recicladores de base (1a etapa)", "clas": "Nuevo", "po": 0, "pf": 14400000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Economia Circular", "proj": "Inscripcion Acuerdo APL", "clas": "Nuevo", "po": 0, "pf": 3790461, "pg": 3792041, "tent": false, "nota": "5602575-0001. Pagado.", "oc": ""}, {"area": "Economia Circular", "proj": "Papel higienico Fontova", "clas": "Fuera de POA", "po": 0, "pf": 156600, "pg": 156600, "tent": false, "nota": "Ejecutado fuera de POA.", "oc": "Si"}, {"area": "Economia Circular", "proj": "Retiro Residuos El Trebal Maipu", "clas": "Fuera de POA", "po": 0, "pf": 3540000, "pg": 3540000, "tent": false, "nota": "5602575-0012. Ejecutado fuera de POA.", "oc": "Si"}, {"area": "Naturaleza", "proj": "Nuevo Proyecto de Biodiversidad", "clas": "POA", "po": 120000000, "pf": 100000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "El Trebal - Continuacion", "clas": "POA", "po": 25000000, "pf": 0, "pg": 0, "tent": false, "nota": "No se realiza: ahorro liberado", "oc": ""}, {"area": "Naturaleza", "proj": "El Bato, La Chimba - Analisis agua", "clas": "POA", "po": 15000000, "pf": 0, "pg": 0, "tent": false, "nota": "No se realiza: ahorro liberado", "oc": ""}, {"area": "Naturaleza", "proj": "Aguada La Chimba - Continuacion", "clas": "POA", "po": 50000000, "pf": 41452010, "pg": 20726005, "tent": false, "nota": "5602575-0004 'Plan trabajo 2026'. Pago parcial.", "oc": ""}, {"area": "Naturaleza", "proj": "GV - Huella Hidrica Corporativa", "clas": "POA", "po": 20900232, "pf": 15000000, "pg": 0, "tent": false, "nota": "Linea GV, clasificada en Naturaleza (agua).", "oc": ""}, {"area": "Naturaleza", "proj": "El Bato - Continuacion proyecto 2019", "clas": "POA", "po": 45000000, "pf": 40579184, "pg": 20289592, "tent": false, "nota": "5602575-0009 'Pago 1'. Pago parcial.", "oc": ""}, {"area": "Naturaleza", "proj": "Estero Tongoy - Continuacion", "clas": "POA", "po": 7000000, "pf": 3500000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Isla Kaikue - Continuacion", "clas": "POA", "po": 7000000, "pf": 3500000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Huairavo - Continuacion", "clas": "POA", "po": 25000000, "pf": 25000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Centro de rescate Huilo Huilo - Etapa 3", "clas": "POA", "po": 10000000, "pf": 10000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Vientos del Chelenko - Mantencion", "clas": "POA", "po": 7000000, "pf": 7000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "El Bato - Consulta pertinencia retiro Totora", "clas": "POA", "po": 5000000, "pf": 5000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Nevado Tres Cruces - Continuacion", "clas": "POA", "po": 7000000, "pf": 3500000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Rio Claro - Continuacion y fin", "clas": "POA", "po": 7000000, "pf": 3500000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Remote Waters", "clas": "Nuevo", "po": 0, "pf": 3000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Levantamiento informacion Jardines", "clas": "Nuevo", "po": 0, "pf": 2800000, "pg": 707964, "tent": false, "nota": "5602575-0005. Pago parcial.", "oc": ""}, {"area": "Naturaleza", "proj": "Estandar Jardines", "clas": "Nuevo", "po": 0, "pf": 15000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Lemu", "clas": "Nuevo", "po": 0, "pf": 5000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Rvalvec", "clas": "Nuevo", "po": 0, "pf": 3000000, "pg": 0, "tent": false, "nota": "", "oc": ""}, {"area": "Naturaleza", "proj": "Mantenimiento refugios extra", "clas": "Nuevo", "po": 0, "pf": 15854000, "pg": 3050000, "tent": false, "nota": "5602575-0006/07/08 (Antofagasta+Copiapo). Pago parcial.", "oc": ""}, {"area": "Naturaleza", "proj": "Gastos menores Naturaleza fuera de POA", "clas": "Fuera de POA", "po": 0, "pf": 7390779, "pg": 7390779, "tent": false, "nota": "Placa, gravilla, cercos, camiones aljibe, totem, aireadores, otros.", "oc": "Si"}, {"area": "Naturaleza", "proj": "Piloto recirculacion de aguas grises", "clas": "Fuera de POA", "po": 0, "pf": 1050000, "pg": 1050000, "tent": false, "nota": "5602575-0010. Ejecutado fuera de POA.", "oc": "Si"}];
+
+/* ---- Autoguardado local (localStorage) ---- */
+const STORAGE_KEY='cuadreAsesorias2026_data_v1';
+const SAVED_AT_KEY='cuadreAsesorias2026_savedAt_v1';
+function cloneDefault(){ return JSON.parse(JSON.stringify(DEFAULT_DATA)); }
+function loadData(){
+  try{
+    const raw=localStorage.getItem(STORAGE_KEY);
+    if(raw){ const parsed=JSON.parse(raw); if(Array.isArray(parsed)) return parsed; }
+  }catch(e){ console.warn('No se pudo leer el guardado local:',e); }
+  return cloneDefault();
+}
+let DATA = loadData();
+function saveData(){
+  try{
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(DATA));
+    localStorage.setItem(SAVED_AT_KEY, new Date().toISOString());
+    showSaved(true);
+  }catch(e){
+    console.warn('No se pudo guardar localmente:',e);
+    showSaved(false);
+  }
+}
+function showSaved(ok){
+  const el=document.getElementById('saveInfo');
+  if(!el) return;
+  if(ok){
+    const now=new Date();
+    const hh=(''+now.getHours()).padStart(2,'0'), mm=(''+now.getMinutes()).padStart(2,'0');
+    el.textContent='✓ Guardado automáticamente · '+hh+':'+mm;
+    el.style.color='var(--green)';
+  } else {
+    el.textContent='⚠ No se pudo guardar en este navegador (revisa que no esté en modo privado)';
+    el.style.color='var(--red)';
+  }
+}
+function initSaveIndicator(){
+  const el=document.getElementById('saveInfo');
+  if(!el) return;
+  let ts=null;
+  try{ ts=localStorage.getItem(SAVED_AT_KEY); }catch(e){}
+  if(ts){
+    const d=new Date(ts);
+    const hh=(''+d.getHours()).padStart(2,'0'), mm=(''+d.getMinutes()).padStart(2,'0');
+    el.textContent='Cargado desde tu último guardado · '+hh+':'+mm;
+  } else {
+    el.textContent='Los cambios se guardan automáticamente en este navegador';
+  }
+  el.style.color='var(--mut)';
+}
+function resetData(){
+  if(!confirm('¿Restablecer los datos originales? Se perderán los cambios guardados en este navegador.')) return;
+  DATA = cloneDefault();
+  try{ localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(SAVED_AT_KEY); }catch(e){}
+  render();
+  const el=document.getElementById('saveInfo');
+  if(el){ el.textContent='Datos originales restablecidos (sin guardar todavía)'; el.style.color='var(--mut)'; }
+}
+
+const fmt = n => n===0?'—':Math.round(n).toLocaleString('es-CL');
+const money = n => '$'+fmt(n);
+const num = v => parseInt((''+(v||'')).replace(/[^0-9]/g,''))||0;
+const areaCls = a => a.startsWith('Cambio')?'cc':a.startsWith('Econom')?'ec':'nat';
+const areaShort = a => a.startsWith('Cambio')?'CC':a.startsWith('Econom')?'EC':'NAT';
+let fArea='Todas', fOC='Todas', sortKey='', sortDir='', tab='tabla';
+
+function estado(d){
+  if(d.pf===0) return ['No se realizará','norun'];
+  if(d.pg>=d.pf) return ['Ejecutado','exec'];
+  if(d.oc==='Si' || d.pg>0) return ['En curso','curso'];
+  return ['Por ejecutar','por'];
+}
+function pend(d){ return Math.max(d.pf-d.pg,0); }
+function valFor(d,k){ return k==='pend'?pend(d):d[k]; }
+function alerta(d){
+  if(d.pf===0) return ['—','dash'];
+  if(d.clas==='Fuera de POA') return ['Ejecutado','ok'];
+  if(d.oc==='') return ['Definir OC','def'];
+  if(d.oc==='No' && pend(d)>0) return ['Pagar/OC ya','ya'];
+  if(pend(d)===0) return ['Pagado','ok'];
+  return ['OK con OC','ok'];
+}
+function visible(d){
+  if(fArea!=='Todas' && d.area!==fArea) return false;
+  if(fOC==='Si' && d.oc!=='Si') return false;
+  if(fOC==='No' && d.oc!=='No') return false;
+  if(fOC==='Sin marcar' && d.oc!=='') return false;
+  return true;
+}
+function renderFilters(){
+  const areas=['Todas',...new Set(DATA.map(d=>d.area))];
+  let h='<span class="flab">Área</span>';
+  areas.forEach(a=>h+='<button class="chipf '+(fArea===a?'on':'')+'" onclick="setF(\'a\',\''+a+'\')">'+a+'</button>');
+  h+='<span style="width:10px"></span><span class="flab">OC</span>';
+  [['Todas','Todas'],['Si','Con OC'],['No','Sin OC'],['Sin marcar','Sin marcar']].forEach(o=>h+='<button class="chipf '+(fOC===o[0]?'on':'')+'" onclick="setF(\'o\',\''+o[0]+'\')">'+o[1]+'</button>');
+  document.getElementById('filters').innerHTML=h;
+}
+function setF(t,v){ if(t==='a')fArea=v; else fOC=v; renderFilters(); render(); }
+function setSort(k){
+  if(sortKey===k){ sortDir = sortDir==='desc'?'asc':'desc'; }
+  else { sortKey=k; sortDir='desc'; }
+  updateCarets(); render();
+}
+function updateCarets(){
+  const m={po:'cO',pf:'cF',pg:'cP',pend:'cN'};
+  Object.values(m).forEach(id=>document.getElementById(id).textContent='');
+  if(sortKey) document.getElementById(m[sortKey]).textContent = sortDir==='asc'?' ▲':' ▼';
+}
+
+function render(){
+  let order=DATA.map((d,i)=>i).filter(i=>visible(DATA[i]));
+  if(sortKey) order.sort((a,b)=>{const va=valFor(DATA[a],sortKey),vb=valFor(DATA[b],sortKey);return sortDir==='asc'?va-vb:vb-va;});
+  let h='';
+  order.forEach(i=>{
+    const d=DATA[i]; const [es,ec]=estado(d); const [al,ac]=alerta(d); const p=pend(d);
+    h+='<tr>'
+     +'<td><span class="proj">'+d.proj+'</span>'+(d.nota?'<span class="nota">'+(d.tent?'⚠ ':'')+d.nota+'</span>':'')+'</td>'
+     +'<td><span class="band '+areaCls(d.area)+'">'+areaShort(d.area)+'</span></td>'
+     +'<td><span class="cl">'+d.clas+'</span></td>'
+     +'<td class="num">'+fmt(d.po)+'</td>'
+     +'<td class="num">'+fmt(d.pf)+'</td>'
+     +'<td class="num"><input class="pago-in" type="text" value="'+(d.pg?d.pg.toLocaleString('es-CL'):'0')+'" onchange="setPg('+i+',this.value)"></td>'
+     +'<td class="num"><b>'+fmt(p)+'</b></td>'
+     +'<td>'+(d.clas==='Fuera de POA'||d.pf===0?'<span class="cl">—</span>':
+        '<span class="oc"><button class="si '+(d.oc==='Si'?'on':'')+'" onclick="setOc('+i+',\'Si\')">Sí</button>'
+        +'<button class="no '+(d.oc==='No'?'on':'')+'" onclick="setOc('+i+',\'No\')">No</button></span>')+'</td>'
+     +'<td><span class="st '+ec+'">'+es+'</span></td>'
+     +'<td><span class="al '+ac+'">'+al+'</span></td>'
+     +'<td><button class="del" title="Quitar" onclick="delRow('+i+')">✕</button></td>'
+     +'</tr>';
+  });
+  document.getElementById('tb').innerHTML=h;
+  const vis=order.map(i=>DATA[i]);
+  const sum=k=>vis.reduce((a,d)=>a+(k==='p'?pend(d):d[k]),0);
+  document.getElementById('tf').innerHTML='<tr><td colspan="3">TOTAL (filtro actual)</td>'
+    +'<td class="num">'+fmt(sum('po'))+'</td><td class="num">'+fmt(sum('pf'))+'</td>'
+    +'<td class="num">'+fmt(sum('pg'))+'</td><td class="num">'+fmt(sum('p'))+'</td><td colspan="4"></td></tr>';
+  renderCards();
+  if(tab==='viz') renderViz();
+}
+function renderCards(){
+  const orig=DATA.filter(d=>d.clas==='POA').reduce((a,d)=>a+d.po,0);
+  const proy=DATA.reduce((a,d)=>a+d.pf,0);
+  const pag=DATA.reduce((a,d)=>a+d.pg,0);
+  const pen=DATA.reduce((a,d)=>a+pend(d),0);
+  const compOC=DATA.filter(d=>d.oc==='Si').reduce((a,d)=>a+d.pf,0);
+  const alerts=DATA.filter(d=>alerta(d)[1]==='ya').length;
+  const C=(l,v,cl='')=>'<div class="card '+cl+'"><div class="lab">'+l+'</div><div class="val">'+v+'</div></div>';
+  document.getElementById('cards').innerHTML=
+    C('Presup. original POA',money(orig))+C('Final proyectado',money(proy))
+   +C('Comprometido (con OC)',money(compOC),'commit')+C('Pagado a la fecha',money(pag))
+   +C('Pendiente total',money(pen))+C('Alertas "pagar ya"',alerts,'alert');
+}
+function setOc(i,v){ DATA[i].oc = DATA[i].oc===v?'':v; saveData(); render(); }
+function setPg(i,v){ DATA[i].pg=num(v); saveData(); render(); }
+function delRow(i){ if(confirm('¿Quitar "'+DATA[i].proj+'" del cuadre?')){ DATA.splice(i,1); saveData(); render(); } }
+function togglePanel(){ document.getElementById('panel').classList.toggle('show'); }
+function addRow(){
+  const na=document.getElementById('f_na').value.trim();
+  if(!na){ alert('Escribe el nombre de la asesoría.'); return; }
+  DATA.push({area:document.getElementById('f_ar').value, proj:na,
+    clas:document.getElementById('f_cl').value, po:num(document.getElementById('f_po').value),
+    pf:num(document.getElementById('f_pf').value), pg:num(document.getElementById('f_pg').value), tent:false, nota:'', oc:''});
+  saveData();
+  ['f_na','f_po','f_pf','f_pg'].forEach(id=>document.getElementById(id).value='');
+  togglePanel(); render();
+}
+
+function setTab(t){
+  tab=t;
+  document.getElementById('tab_tabla').style.display = t==='tabla'?'':'none';
+  document.getElementById('tab_viz').style.display = t==='viz'?'':'none';
+  document.getElementById('tb_tabla').classList.toggle('on',t==='tabla');
+  document.getElementById('tb_viz').classList.toggle('on',t==='viz');
+  if(t==='viz') renderViz();
+}
+function trackbar(segs){
+  const tot=segs.reduce((a,s)=>a+s.val,0)||1;
+  return '<div class="track">'+segs.map(s=>'<div class="seg" style="width:'+(s.val/tot*100).toFixed(2)+'%;background:'+s.c+'"></div>').join('')+'</div>';
+}
+function donut(segs){
+  const tot=segs.reduce((a,s)=>a+s.val,0)||1;
+  const r=64,cx=82,cy=82,C=2*Math.PI*r; let off=0; let circ='';
+  segs.forEach(s=>{ if(s.val<=0) return; const len=s.val/tot*C;
+    circ+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+s.c+'" stroke-width="30" stroke-dasharray="'+len.toFixed(2)+' '+(C-len).toFixed(2)+'" stroke-dashoffset="'+(-off).toFixed(2)+'" transform="rotate(-90 '+cx+' '+cy+')"></circle>';
+    off+=len; });
+  return '<svg viewBox="0 0 164 164" width="164" height="164" style="flex:0 0 auto">'+circ
+    +'<circle cx="'+cx+'" cy="'+cy+'" r="46" fill="#fff"></circle>'
+    +'<text x="'+cx+'" y="'+(cy-2)+'" text-anchor="middle" font-size="13" font-weight="700" fill="#1F3A5F">'+money(tot)+'</text>'
+    +'<text x="'+cx+'" y="'+(cy+14)+'" text-anchor="middle" font-size="9" fill="#6b7780">monto final</text></svg>';
+}
+function renderViz(){
+  const vig=DATA.filter(d=>d.pf>0);
+  const con=vig.filter(d=>d.oc==='Si'), sin=vig.filter(d=>d.oc!=='Si');
+  const conPf=con.reduce((a,d)=>a+d.pf,0), sinPf=sin.reduce((a,d)=>a+d.pf,0);
+  const totPf=conPf+sinPf||1;
+  const pendCon=con.reduce((a,d)=>a+pend(d),0), pendSin=sin.reduce((a,d)=>a+pend(d),0);
+  const TEAL='#0E7C7B',AMBER='#B7791F',GREEN='#1E7A46',RED='#C0392B',NAVY='#1F3A5F',GREY='#9aa7ad';
+  const leg=(c,t,v)=>'<div class="vrow"><span><span class="dot" style="background:'+c+'"></span>'+t+'</span><span class="rt">'+money(v)+'</span></div>';
+
+  let b1='<div class="vcard"><h3>Cobertura de OC</h3><p class="sub">Monto final de proyectos con monto &gt; 0 ('+vig.length+'). Los gastos ya ejecutados cuentan como Con OC (por definición tuvieron orden de compra). Con OC + Sin OC = '+money(totPf)+', igual al Final proyectado. Excluye sólo lo que no se realizará.</p>'
+    +trackbar([{val:conPf,c:TEAL},{val:sinPf,c:AMBER}])
+    +leg(TEAL,'Con OC ('+con.length+')',conPf)+leg(AMBER,'Sin OC ('+sin.length+')',sinPf)
+    +'<div class="callout '+(sinPf===0?'good':'')+'">'+(sinPf===0?'Todo el presupuesto vigente está comprometido con OC.':((sinPf/totPf*100).toFixed(0)+'% del presupuesto vigente aún sin OC ('+money(sinPf)+')'))+'</div></div>';
+
+  let b2='<div class="vcard"><h3>Pendiente de pago</h3><p class="sub">Saldo por pagar, separando lo ya respaldado con OC de lo que falta gestionar.</p>'
+    +trackbar([{val:pendCon,c:GREEN},{val:pendSin,c:RED}])
+    +leg(GREEN,'Pendiente con OC',pendCon)+leg(RED,'Pendiente sin OC',pendSin)
+    +'<div class="callout '+(pendSin===0?'good':'')+'">'+(pendSin===0?'No hay pendiente sin OC.':'A gestionar (pendiente sin OC): '+money(pendSin))+'</div></div>';
+
+  const areas=[...new Set(vig.map(d=>d.area))];
+  let b3='<div class="vcard full"><h3>Con OC vs sin OC, por área</h3><p class="sub">Sobre monto final proyectado.</p>';
+  areas.forEach(ar=>{
+    const g=vig.filter(d=>d.area===ar); const c=g.filter(d=>d.oc==='Si').reduce((a,d)=>a+d.pf,0);
+    const s=g.reduce((a,d)=>a+d.pf,0)-c;
+    b3+='<div class="arow"><div class="albl"><span>'+ar+'</span><span class="am">'+money(c)+' con OC · '+money(s)+' sin OC</span></div>'+trackbar([{val:c,c:TEAL},{val:s,c:AMBER}])+'</div>';
+  });
+  b3+='</div>';
+
+  const ests=[['Ejecutado',GREEN],['En curso',AMBER],['Por ejecutar',NAVY],['No se realizará',GREY]];
+  const totE=DATA.reduce((a,d)=>a+d.pf,0)||1;
+  const segs=ests.map(e=>({label:e[0],c:e[1],val:DATA.filter(d=>estado(d)[0]===e[0]).reduce((a,d)=>a+d.pf,0)}));
+  let b4='<div class="vcard full"><h3>Distribución por estado</h3><p class="sub">Monto final proyectado según estado actual.</p><div class="donutwrap">'+donut(segs)
+    +'<div class="dlegend">'+segs.map(s=>'<div class="vrow"><span><span class="dot" style="background:'+s.c+'"></span>'+s.label+'</span><span class="rt">'+money(s.val)+' · '+(s.val/totE*100).toFixed(0)+'%</span></div>').join('')+'</div></div></div>';
+
+  document.getElementById('tab_viz').innerHTML='<div class="vizgrid">'+b1+b2+b3+b4+'</div>';
+}
+
+function rowsOut(){
+  return DATA.map(d=>{const [es]=estado(d);const [al]=alerta(d);
+    return {Area:d.area,Proyecto:d.proj,Clasificacion:d.clas,'Presupuesto original':d.po,
+      'Monto final proyectado':d.pf,'Pagado a la fecha':d.pg,'Pendiente':pend(d),
+      'OC emitida':d.oc||'',Estado:es,Alerta:al,Nota:d.nota};});
+}
+function dlXlsx(){
+  const ws=XLSX.utils.json_to_sheet(rowsOut());
+  ws['!cols']=[{wch:15},{wch:42},{wch:13},{wch:16},{wch:17},{wch:15},{wch:14},{wch:10},{wch:13},{wch:14},{wch:40}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Cuadre 2026'); XLSX.writeFile(wb,'Cuadre_Asesorias_2026.xlsx');
+}
+renderFilters(); render(); initSaveIndicator();
+</script>
+</body>
+</html>

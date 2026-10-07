@@ -1,0 +1,1043 @@
+<script>
+/* =====================================================================
+   VAsistente · paleta ⌘K: búsqueda instantánea local + búsqueda en Drive
+   (IA de Google, pestaña nueva) + preguntas a Gemini sólo si está activo.
+   Anti-alucinación: Gemini responde sólo con datos de la app y siempre
+   muestra sus fuentes; sin clave funciona como directorio (SPEC §10, §13).
+   Privacidad: S ya trae sólo las tareas visibles; aquí nada más las lee.
+   v3.1 (§14.4): sin la ruta de la página de tareas («Abrir mis tareas» usa el panel derecho), comandos
+   de administración según isAdminUI() y menos notas al pie.
+   ===================================================================== */
+
+const ASST = {
+  open: false, handle: null, q: '', items: [], active: -1, def: 0, ai: null, seq: 0,
+  docs: null, docsFor: null, docsIdx: null, expanded: {}, raf: 0, picked: false, returnFocus: null,
+};
+const ASST_MEMO = {};
+const ASST_CAP = 6;          // filas por grupo antes de "Ver más"
+const ASST_DIR_CAP = 8;      // filas de "Resultados en el directorio"
+const ASST_RECENT_MAX = 6;
+const ASST_RECENT_KEY = 'assistant.recent';
+const ASST_RESTORE_MS = 5 * 60 * 1000;
+const ASST_DRIVE_URL = 'https://drive.google.com/drive/search?q=';
+const ASST_DRIVE_MIN = 3;                      // largo mínimo para ofrecer la fila de Drive
+
+// Mismas stopwords que Asistente.gs (normalizadas, sin tildes)
+const ASST_STOPWORDS = 'a al algo alguien algun alguna algunas alguno algunos ante antes aqui asi aun aunque cada como con ' +
+  'contra cual cuales cualquier cuando cuanto cuanta cuantos cuantas de del desde donde dos e el ella ellas ellos en entre ' +
+  'era eran es esa esas ese eso esos esta estaba estado estados estan estar estas este esto estos fue fueron ha han hay ' +
+  'hasta he la las le les lo los mas me mi mia mias mio mios mis muy nada ni no nos nosotros nuestra nuestras nuestro ' +
+  'nuestros o os otra otras otro otros para pero poco por porque pues que quien quienes se sea segun ser si sido sin sobre ' +
+  'solo son su sus tal tambien tan tanto te tenemos tener tengo tiene tienen toda todas todo todos tu tus u un una unas uno ' +
+  'unos usted ustedes y ya yo dame dime muestra muestrame mostrar ver veo busca buscar busco encontrar encuentro necesito ' +
+  'quiero queremos saber sabes puedes podemos existe existen aparece aparecen guardamos guardar guardado guardada guardo ' +
+  'guarda guardan llevamos lleva llevan va van vamos hace hacen hacer hizo hicimos hicieron favor porfa info informacion ' +
+  'acerca respecto relacionado relacionada relacionados relacionadas cosa cosas lista listado toca tocan queda quedan falta ' +
+  'faltan tenia pilar pilares the of and';
+// Palabras que significan "yo" → se reemplazan por el nombre del usuario actual
+const ASST_ME_WORDS = { mis: 1, mias: 1, mios: 1, tengo: 1 };
+
+const ASST_GROUPS = [
+  { type: 'task', label: 'Tareas' },
+  { type: 'project', label: 'Proyectos' },
+  { type: 'evidence', label: 'Evidencias y links' },
+  { type: 'line', label: 'Líneas de presupuesto' },
+  { type: 'comment', label: 'Comentarios' },
+  { type: 'cascade', label: 'Indicadores Cascade' },
+];
+const ASST_TYPE = {
+  task: { icon: 'list-todo', tone: 'indigo' },
+  project: { icon: 'folder-kanban', tone: 'violet' },
+  evidence: { icon: 'link', tone: 'sky' },
+  line: { icon: 'wallet', tone: 'emerald' },
+  comment: { icon: 'message-square-text', tone: 'amber' },
+  cascade: { icon: 'target', tone: 'zinc' },
+};
+
+/* ---------- Entrada pública ---------- */
+function openAssistant(initialQuery) {
+  if (!S) { toast('Cargando datos…', 'info'); return; }
+  const q0 = typeof initialQuery === 'string' ? initialQuery.trim().slice(0, 500) : '';
+  if (ASST.open && ASST.handle) { asstSetQuery(q0 || ASST.q, !q0); return; }
+  // Sobre un formulario/diálogo abierto, el registro elegido quedaría tapado (drawer z-40 < modal z-50)
+  if (MODALS.length) { toast('Cierra el formulario abierto para buscar', 'info'); return; }
+  S.ui = S.ui || {};
+  const sv = S.ui.assistant || {};
+  // Sólo se restaura para la misma persona (la identidad elegida en Ajustes puede cambiar)
+  const fresh = !!sv.at && Date.now() - sv.at < ASST_RESTORE_MS && (sv.me || '') === (myEmail() || '');
+  ASST.q = q0 || (fresh ? (sv.q || '') : '');
+  ASST.ai = !q0 && fresh && sv.ai && asstAiStillVisible(sv.ai) ? sv.ai : null;
+  ASST.active = -1;
+  ASST.expanded = {};
+  ASST.picked = false;
+  ASST.open = true;
+  ASST.returnFocus = document.activeElement;
+  ASST.handle = openModal({
+    size: 'xl', autofocus: false,
+    body: asstShellHtml(),
+    onMount: el => asstMount(el),
+    onClose: asstOnClose,
+  });
+}
+
+action('assistant.open', d => openAssistant(d && typeof d.q === 'string' ? d.q : ''));
+action('assistant.pick', d => asstActivate(Number(d.idx)));
+action('assistant.close', () => asstClose());
+action('assistant.clear', () => asstSetQuery('', false));
+action('assistant.forget', d => { asstForget(d.q); asstRender(false); asstFocus(); });
+action('assistant.forgetAll', () => { LS.set(ASST_RECENT_KEY, []); ASST.active = -1; asstRender(false); asstFocus(); });
+action('assistant.copy', () => { const a = ASST.ai && ASST.ai.res && ASST.ai.res.answer; if (a) copyText(a); });
+
+/* ---------- Ciclo de vida del modal ---------- */
+function asstShellHtml() {
+  const gem = asstGemini();
+  const kb = CX.kbd;
+  return '<div class="flex h-14 shrink-0 items-center gap-3 border-b border-zinc-200 px-4 dark:border-zinc-800">' +
+      '<span class="grid size-7 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 text-white shadow-sm ring-1 ring-black/5">' + icon('sparkles', 'size-4') + '</span>' +
+      '<input id="asst-input" type="text" role="combobox" aria-expanded="true" aria-controls="asst-list" aria-autocomplete="list" ' +
+        'aria-label="Buscar o preguntar" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="500" enterkeyhint="search" ' +
+        'placeholder="' + (gem ? 'Busca proyectos, tareas, links… o pregunta a Gemini' : 'Busca proyectos, tareas, links… o pregúntale a Drive') + '" ' +
+        'class="h-full min-w-0 flex-1 border-0 bg-transparent p-0 text-base text-zinc-900 placeholder:text-zinc-400 focus:outline-none focus:ring-0 sm:text-[15px] dark:text-zinc-100 dark:placeholder:text-zinc-500">' +
+      '<span id="asst-clear" class="hidden">' + iconBtn({ icon: 'x', action: 'assistant.clear', title: 'Limpiar búsqueda', cls: 'size-7' }) + '</span>' +
+      '<kbd class="hidden sm:inline-block ' + kb + '">Esc</kbd>' +
+      '<span class="sm:hidden">' + btn({ label: 'Cerrar', variant: 'ghost', size: 'sm', action: 'assistant.close' }) + '</span>' +
+    '</div>' +
+    '<div id="asst-list" role="listbox" aria-label="Resultados" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2"></div>' +
+    '<div class="hidden shrink-0 items-center gap-4 border-t border-zinc-200 bg-zinc-50/80 px-4 py-2 text-[11px] text-zinc-500 sm:flex dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-400">' +
+      '<span class="inline-flex items-center gap-1"><kbd class="' + kb + '">↑</kbd><kbd class="' + kb + '">↓</kbd> navegar</span>' +
+      '<span class="inline-flex items-center gap-1"><kbd class="' + kb + '">↵</kbd> abrir</span>' +
+      '<span class="inline-flex items-center gap-1"><kbd class="' + kb + '">' + asstAlt() + '</kbd><kbd class="' + kb + '">↵</kbd> Drive</span>' +
+      (gem ? '<span class="inline-flex items-center gap-1"><kbd class="' + kb + '">' + asstMod() + '</kbd><kbd class="' + kb + '">↵</kbd> Gemini</span>' : '') +
+    '</div>';
+}
+
+// Ajusta el modal de Core a paleta: pantalla completa en móvil, 680 px arriba en escritorio
+function asstMount(el) {
+  const wrap = el.parentNode;
+  if (wrap) wrap.className = 'fixed inset-0 flex items-stretch justify-center sm:items-start sm:px-4 sm:pt-[10vh]';
+  el.className = 'relative flex h-dvh w-full flex-col overflow-hidden bg-white shadow-2xl ring-1 ring-zinc-900/5 anim-scale-in sm:h-auto sm:max-h-[min(640px,80vh)] sm:max-w-[680px] sm:rounded-2xl dark:bg-zinc-900 dark:ring-white/10';
+  el.setAttribute('aria-label', 'Buscar o preguntar');
+  const body = el.querySelector('[data-modal-body]');
+  if (body) body.className = 'flex min-h-0 flex-1 flex-col';
+  const inp = el.querySelector('#asst-input');
+  const list = el.querySelector('#asst-list');
+  inp.value = ASST.q;
+  inp.addEventListener('input', () => {
+    ASST.q = inp.value;
+    ASST.active = -1;
+    ASST.expanded = {};
+    asstSchedule(true);
+  });
+  inp.addEventListener('keydown', asstKeydown);
+  list.addEventListener('mousemove', e => {
+    const row = e.target.closest('[data-asst-opt]');
+    if (!row) return;
+    const i = Number(row.dataset.idx);
+    if (i !== ASST.active) asstSetActive(i, true);
+  });
+  asstRender(true);
+  // Foco inmediato: si se escribe justo después de ⌘K no se pierden teclas
+  const focusInp = () => { if (document.activeElement !== inp) { inp.focus({ preventScroll: true }); if (ASST.q) inp.select(); } };
+  focusInp();
+  setTimeout(focusInp, 30);
+}
+
+function asstOnClose() {
+  if (S) {
+    S.ui = S.ui || {};
+    S.ui.assistant = { q: ASST.q, ai: ASST.ai && ASST.ai.status === 'done' ? ASST.ai : null, at: Date.now(), me: myEmail() || '' };
+  }
+  ASST.open = false;
+  ASST.handle = null;
+  ASST.seq++;                       // descarta respuestas en vuelo
+  if (ASST.raf) { clearTimeout(ASST.raf); ASST.raf = 0; }
+  const rf = ASST.returnFocus;
+  ASST.returnFocus = null;
+  if (!ASST.picked && rf && rf.focus && document.contains(rf)) setTimeout(() => { try { rf.focus({ preventScroll: true }); } catch (e) { /* nada */ } }, 0);
+}
+
+function asstClose() { if (ASST.handle) ASST.handle.close(); }
+
+function asstFocus() {
+  const inp = document.getElementById('asst-input');
+  if (inp && window.matchMedia && matchMedia('(pointer: fine)').matches) inp.focus({ preventScroll: true });
+}
+
+function asstSetQuery(q, select) {
+  ASST.q = String(q || '');
+  ASST.active = -1;
+  ASST.expanded = {};
+  const inp = document.getElementById('asst-input');
+  if (inp) {
+    inp.value = ASST.q;
+    inp.focus({ preventScroll: true });
+    if (select) inp.select();
+    else { try { inp.setSelectionRange(ASST.q.length, ASST.q.length); } catch (e) { /* nada */ } }
+  }
+  asstRender(true);
+}
+
+// Agrupa pulsaciones rápidas en un solo render (timeout 0: también corre si el iframe no está pintando)
+function asstSchedule(reset) {
+  if (ASST.raf) clearTimeout(ASST.raf);
+  ASST.raf = setTimeout(() => { ASST.raf = 0; asstRender(reset); }, 0);
+}
+
+/* ---------- Render ---------- */
+function asstRender(reset) {
+  const list = document.getElementById('asst-list');
+  if (!list || !S) return;
+  const q = ASST.q.trim();
+  ASST.items = [];
+  ASST.def = 0;
+  const add = it => { ASST.items.push(it); return ASST.items.length - 1; };
+  let html;
+  try {
+    html = q ? asstQueryHtml(q, add) : asstHomeHtml(add);
+  } catch (e) {
+    console.error(e);
+    html = '<p class="px-4 py-10 text-center text-sm text-red-600 dark:text-red-400">' + esc(errMsg(e)) + '</p>';
+  }
+  list.innerHTML = html;
+  refreshIcons(list);
+  if (reset) list.scrollTop = 0;
+  if (ASST.active < 0 || ASST.active >= ASST.items.length) ASST.active = ASST.items.length ? ASST.def : -1;
+  asstSetActive(ASST.active, true);
+  const clr = document.getElementById('asst-clear');
+  if (clr) clr.classList.toggle('hidden', !ASST.q);
+  const ae = document.activeElement;
+  const pal = ASST.handle && ASST.handle.el;
+  if (pal && (!ae || ae === document.body || !pal.contains(ae))) asstFocus();
+}
+
+function asstSetActive(i, noScroll) {
+  ASST.active = i;
+  const list = document.getElementById('asst-list');
+  if (!list) return;
+  list.querySelectorAll('[data-asst-opt]').forEach(el => {
+    const on = Number(el.dataset.idx) === i;
+    el.setAttribute('data-active', on ? 'true' : 'false');
+    el.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  const cur = document.getElementById('asst-opt-' + i);
+  const inp = document.getElementById('asst-input');
+  if (inp) { if (cur) inp.setAttribute('aria-activedescendant', cur.id); else inp.removeAttribute('aria-activedescendant'); }
+  if (cur && !noScroll) {
+    const sec = cur.closest('[data-asst-sec]');
+    const first = sec && sec.querySelector('[data-asst-opt]') === cur;
+    (first ? sec : cur).scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function asstKeydown(e) {
+  if (e.isComposing) return;
+  const n = ASST.items.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (!n) return;
+    const d = e.key === 'ArrowDown' ? 1 : -1;
+    asstSetActive(ASST.active < 0 ? (d > 0 ? 0 : n - 1) : (ASST.active + d + n) % n, false);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (e.altKey) { asstDrive(ASST.q); return; }
+    if (e.metaKey || e.ctrlKey) { asstAsk(ASST.q); return; }
+    if (n && ASST.active >= 0) asstActivate(ASST.active);
+    else if (ASST.q.trim().length >= 2) asstAsk(ASST.q);
+  }
+}
+
+// Fila genérica navegable (botón con role=option; el foco se queda en el input)
+function asstRowHtml(i, o) {
+  const ic = o.iconHtml || '<span class="grid size-8 shrink-0 place-items-center rounded-lg ' + tone(o.tone || 'zinc').iconbox + '">' + icon(o.icon || 'circle', 'size-4') + '</span>';
+  return '<button type="button" tabindex="-1" role="option" aria-selected="false" data-asst-opt data-action="assistant.pick" data-idx="' + i + '" id="asst-opt-' + i + '" ' +
+      'class="group flex w-full min-w-0 items-center gap-3 rounded-lg px-2.5 py-2 text-left outline-none transition-colors data-[active=true]:bg-zinc-100 dark:data-[active=true]:bg-zinc-800/70 ' + (o.cls || '') + '">' +
+      ic +
+      '<span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">' + o.title + '</span>' +
+      (o.sub ? '<span class="mt-0.5 block truncate text-xs text-zinc-500 dark:text-zinc-400">' + o.sub + '</span>' : '') + '</span>' +
+      (o.right ? '<span class="hidden shrink-0 items-center gap-1.5 sm:flex">' + o.right + '</span>' : '') +
+      '<span class="hidden shrink-0 text-zinc-400 opacity-0 transition-opacity group-data-[active=true]:opacity-100 sm:block" aria-hidden="true">' + icon('corner-down-left', 'size-3.5') + '</span>' +
+    '</button>';
+}
+
+function asstSection(title, inner, right) {
+  return '<div data-asst-sec role="group" aria-label="' + esc(title) + '" class="pb-1">' +
+      '<div class="flex items-center justify-between gap-2 px-2.5 pb-1 pt-2.5">' +
+        '<span class="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">' + esc(title) + '</span>' + (right || '') +
+      '</div>' + inner +
+    '</div>';
+}
+
+function asstCount(n) { return '<span class="text-[11px] tabular-nums text-zinc-400 dark:text-zinc-500">' + n + '</span>'; }
+
+function asstMoreRow(i, n) {
+  return asstRowHtml(i, {
+    iconHtml: '<span class="grid size-8 shrink-0 place-items-center text-zinc-400">' + icon('chevron-down', 'size-4') + '</span>',
+    title: '<span class="text-zinc-600 dark:text-zinc-300">Ver ' + n + ' más</span>',
+  });
+}
+
+/* ---------- Vista vacía: pista de Drive, recientes, acciones y ejemplos ---------- */
+function asstHomeHtml(add) {
+  let h = asstDriveHintHtml();
+  const rec = asstRecent();
+  if (rec.length) {
+    h += asstSection('Búsquedas recientes', rec.map(q => {
+      const i = add({ kind: 'recent', q: q });
+      return '<div class="group/rec flex items-center gap-1">' +
+        asstRowHtml(i, { icon: 'rotate-ccw-clock', tone: 'zinc', title: esc(q), cls: 'flex-1' }) +
+        iconBtn({ icon: 'x', action: 'assistant.forget', data: { q: q }, title: 'Quitar de recientes', cls: 'size-7 text-zinc-400 sm:opacity-0 sm:group-hover/rec:opacity-100 sm:focus-visible:opacity-100' }) +
+        '</div>';
+    }).join(''), '<button type="button" data-action="assistant.forgetAll" class="rounded text-[11px] font-medium text-zinc-400 transition hover:text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-500 dark:hover:text-zinc-200">Borrar</button>');
+  }
+  const cmds = asstCommands();
+  h += asstSection('Acciones rápidas', cmds.filter(c => c.grp === 'do').map(c => asstCmdRow(add({ kind: 'cmd', cmd: c }), c, [])).join(''));
+  h += asstSection('Ir a', cmds.filter(c => c.grp === 'go').map(c => asstCmdRow(add({ kind: 'cmd', cmd: c }), c, [])).join(''));
+  const chips = asstExamples().map(ex => {
+    const i = add({ kind: 'example', q: ex });
+    return '<button type="button" tabindex="-1" role="option" aria-selected="false" data-asst-opt data-action="assistant.pick" data-idx="' + i + '" id="asst-opt-' + i + '" ' +
+      'class="' + CX.chip + ' max-w-full outline-none data-[active=true]:border-indigo-400 data-[active=true]:bg-indigo-50 data-[active=true]:text-indigo-700 dark:data-[active=true]:border-indigo-500/60 dark:data-[active=true]:bg-indigo-500/10 dark:data-[active=true]:text-indigo-300">' +
+      icon(asstGemini() ? 'sparkles' : 'text-search', 'size-3.5 shrink-0 text-indigo-500 dark:text-indigo-400') + '<span class="truncate">' + esc(ex) + '</span></button>';
+  }).join('');
+  h += asstSection(asstGemini() ? 'Pregúntale a Gemini' : 'Prueba buscar', '<div class="flex flex-wrap gap-2 px-2.5 pb-2 pt-1">' + chips + '</div>');
+  return h;
+}
+
+// Ícono de Drive (sobrio, con un toque de los colores de Drive)
+function asstDriveIcon() {
+  return '<span class="grid size-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-sky-50 to-emerald-50 text-sky-600 ring-1 ring-inset ring-sky-500/20 dark:from-sky-500/15 dark:to-emerald-500/10 dark:text-sky-300 dark:ring-sky-400/20">' + icon('folder-search', 'size-4') + '</span>';
+}
+
+// Pista en la vista vacía: la búsqueda de Drive (con su IA) se lanza desde esta misma paleta
+function asstDriveHintHtml() {
+  return '<div class="mx-1 mb-1 mt-1 flex items-center gap-3 rounded-xl border border-dashed border-zinc-200 px-2.5 py-2 dark:border-zinc-700/70">' +
+    asstDriveIcon() +
+    '<p class="min-w-0 flex-1 text-sm text-zinc-600 dark:text-zinc-300">Pregúntale a Drive: la IA de Drive busca en tus archivos</p></div>';
+}
+
+// Fila «Buscar en Drive con IA de Google» (se abre en una pestaña nueva: lo indica la flecha)
+function asstDriveRowHtml(i, q) {
+  const kb = CX.kbd;
+  return '<div class="pb-1">' + asstRowHtml(i, {
+    iconHtml: asstDriveIcon(),
+    title: 'Buscar en Drive con IA de Google · <span class="text-sky-700 dark:text-sky-400">«' + esc(q) + '»</span>',
+    right: '<kbd class="' + kb + '">' + asstAlt() + '</kbd><kbd class="' + kb + '">↵</kbd>' + icon('arrow-up-right', 'size-4 text-zinc-400'),
+  }) + '</div>';
+}
+
+function asstExamples() {
+  const other = (S.users || []).find(u => u.email !== myEmail()) || (S.users || [])[0];
+  return [
+    '¿Qué vence esta semana?',
+    other ? 'Proyectos de ' + other.name : 'Tareas vencidas',
+    '¿Cuánto llevamos pagado en El Bato?',
+  ];
+}
+
+// grp: 'do' y 'go' se ven en la vista vacía; 'find' sólo aparece al buscarlo por nombre.
+// Sin subtítulos que repitan el nombre (§14.4); los de administración siguen isAdminUI().
+function asstCommands() {
+  const dark = document.documentElement.classList.contains('dark');
+  const alerts = typeof myAlertCount === 'function' ? myAlertCount() : 0;
+  const admin = asstAdmin();
+  const pillars = S.pillars || [];
+  return [
+    { grp: 'do', label: 'Nueva tarea', icon: 'plus', tone: 'indigo', kw: 'crear agregar anotar tarea nueva pendiente',
+      run: () => (typeof openTaskForm === 'function' ? openTaskForm({}) : asstOpenMyTasks()) },
+    { grp: 'do', label: 'Nuevo proyecto', icon: 'folder-kanban', tone: 'violet', kw: 'crear agregar proyecto nuevo',
+      run: () => (typeof openProjectForm === 'function' ? openProjectForm({}) : go(asstHome())) },
+    { grp: 'do', label: 'Abrir mis tareas', icon: 'list-todo', tone: alerts ? 'amber' : 'zinc', kw: 'ir abrir ver mis tareas pendientes lista personal panel', badge: alerts,
+      run: () => asstOpenMyTasks() },
+    admin ? { grp: 'go', label: 'Vista general', icon: 'layout-grid', tone: 'zinc', kw: 'ir vista general resumen gestion inicio',
+      run: () => go('#/gestion') } : null,
+  ].concat(pillars.map(p => ({
+    grp: 'go', label: p.label, icon: p.icon, tone: p.color, kw: 'ir gestion pilar ' + p.label + (p.key === 'ec' ? ' residuos' : ''),
+    run: () => go('#/gestion/' + p.key),
+  }))).concat([
+    { grp: 'go', label: 'Presupuesto', icon: 'wallet', tone: 'emerald', kw: 'ir presupuesto resumen cuadre',
+      run: () => go('#/presupuesto') },
+    { grp: 'find', label: 'Cambiar tema', sub: dark ? 'Modo claro' : 'Modo oscuro', icon: dark ? 'sun' : 'moon', tone: 'zinc', kw: 'tema modo oscuro claro dark light', keep: true,
+      run: () => { if (ACTIONS['theme.toggle']) ACTIONS['theme.toggle']({}, document.body); } },
+  ]).concat(pillars.map(p => ({
+    grp: 'find', label: 'Planificación · ' + p.label, sub: 'Carta Gantt', icon: 'chart-gantt', tone: p.color, kw: 'ir planificacion plan gantt carta cronograma calendario ' + p.label,
+    run: () => go('#/gestion/' + p.key + '/plan'),
+  }))).concat([
+    { grp: 'find', label: 'Líneas de presupuesto', icon: 'table-properties', tone: 'emerald', kw: 'ir lineas presupuesto tabla cuadre',
+      run: () => go('#/presupuesto/lineas') },
+    admin ? { grp: 'find', label: 'Solicitudes de compra', sub: 'Ariba', icon: 'inbox', tone: 'indigo', kw: 'ir solicitudes compra ariba aprobacion aprobaciones oc orden pr',
+      run: () => go('#/presupuesto/solicitudes') } : null,
+    { grp: 'find', label: 'Indicadores Cascade', icon: 'target', tone: 'violet', kw: 'ir indicadores cascade catalogo kpi',
+      run: () => go('#/cascade') },
+    admin ? { grp: 'find', label: 'Historial', icon: 'rotate-ccw-clock', tone: 'zinc', kw: 'ir historial cambios registro',
+      run: () => go('#/historial') } : null,
+    { grp: 'find', label: 'Ajustes', icon: 'settings', tone: 'zinc', kw: 'ir ajustes configuracion preferencias notificaciones avisos privacidad drive carpetas',
+      run: () => go('#/ajustes') },
+  ]).filter(Boolean);
+}
+
+// «Mis tareas» vive en el panel derecho (SPEC §14.4): en escritorio se enfoca su campo «Agregar una tarea»
+// (y se despliega si estaba oculto); en pantallas chicas, o sin panel en la vista actual, se abre como hoja lateral.
+function asstOpenMyTasks() {
+  const wide = typeof todoIsWide === 'function' ? todoIsWide() : false;
+  const focusAside = () => {
+    const inp = document.getElementById('todo-add-aside');
+    if (!inp) return false;
+    try { inp.focus({ preventScroll: false }); } catch (e) { inp.focus(); }
+    return true;
+  };
+  if (wide && focusAside()) { setTimeout(focusAside, 30); return 'focus'; }
+  if (wide && document.querySelector('[data-action="todo.expand"]') && ACTIONS['todo.expand']) {
+    ACTIONS['todo.expand']({}, document.body);
+    setTimeout(focusAside, 30);
+    return 'expand';
+  }
+  if (typeof todoOpenSheet === 'function') { todoOpenSheet(); return 'sheet'; }
+  go(asstHome());
+  return 'home';
+}
+
+function asstCmdRow(i, c, toks) {
+  return asstRowHtml(i, {
+    icon: c.icon, tone: c.tone, title: asstHl(c.label, toks), sub: c.sub ? esc(c.sub) : '',
+    right: c.badge ? badge(String(c.badge), 'amber') : '',
+  });
+}
+
+// Palabras para buscar acciones: sin stopwords y sin reemplazar «mis» por mi nombre («mis tareas» → tarea)
+function asstCmdToks(q) {
+  const stop = asstStopSet();
+  return asstUniq(asstWords(q).filter(w => !ASST_ME_WORDS[w] && !stop[w]).map(asstStem));
+}
+
+function asstCmdMatch(c, toks) {
+  if (!toks.length) return false;
+  const words = asstWords(c.label + ' ' + c.kw);
+  return toks.every(t => asstHas(words, t));
+}
+
+/* ---------- Vista con texto: Gemini (si está activo), Drive, acciones, mejor coincidencia y grupos ---------- */
+function asstQueryHtml(q, add) {
+  const gem = asstGemini();
+  const qn = asstKey(q);
+  const ai = ASST.ai && ASST.ai.qn === qn ? ASST.ai : null;
+  const r = asstSearch(q);
+  const canAsk = q.length >= 3 && !(ai && ai.status !== 'error');
+  let h = '';
+  let askIdx = -1, driveIdx = -1;
+
+  if (gem && canAsk) {
+    askIdx = add({ kind: 'ask' });
+    h += '<div class="pb-1">' + asstRowHtml(askIdx, {
+      iconHtml: '<span class="grid size-8 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 text-white shadow-sm">' + icon('sparkles', 'size-4') + '</span>',
+      title: 'Preguntar a Gemini: <span class="text-indigo-600 dark:text-indigo-400">«' + esc(q) + '»</span>',
+      right: '<kbd class="' + CX.kbd + '">' + asstMod() + '</kbd><kbd class="' + CX.kbd + '">↵</kbd>',
+    }) + '</div>';
+  }
+  if (q.length >= ASST_DRIVE_MIN) {
+    driveIdx = add({ kind: 'drive' });
+    h += asstDriveRowHtml(driveIdx, q);
+  }
+
+  if (ai) {
+    h += asstAiHtml(ai, r.toks, add);
+    if (ai.status === 'done') {
+      const firstSrc = ASST.items.findIndex(it => it.kind === 'src');
+      ASST.def = firstSrc >= 0 ? firstSrc : 0;
+    }
+    if (ai.status !== 'error') return h;   // con error, se siguen mostrando los resultados locales
+  }
+
+  let firstIdx = -1;
+  const mark = i => { if (firstIdx < 0) firstIdx = i; return i; };
+
+  const ctoks = asstCmdToks(q);
+  // Primero la acción cuyo nombre contiene más de lo escrito («mis tareas» → «Abrir mis tareas» antes que «Nueva tarea»)
+  const qw = asstUniq(asstWords(q).map(asstStem));
+  const hits = c => { const w = asstWords(c.label); return qw.filter(t => asstHas(w, t)).length; };
+  const cmds = asstCommands().filter(c => asstCmdMatch(c, ctoks))
+    .map((c, i) => ({ c: c, i: i, h: hits(c) })).sort((a, b) => (b.h - a.h) || (a.i - b.i)).map(x => x.c).slice(0, 4);
+  if (cmds.length) h += asstSection('Acciones', cmds.map(c => asstCmdRow(mark(add({ kind: 'cmd', cmd: c })), c, ctoks)).join(''));
+
+  const top = !r.partial && r.list.length >= 2 ? r.list[0] : null;
+  if (top) h += asstSection('Mejor coincidencia', asstDocRow(mark(add({ kind: 'doc', doc: top.d })), top.d, r.toks));
+
+  if (r.partial) {
+    h += '<p class="px-2.5 pb-1 pt-2 text-xs text-zinc-500 dark:text-zinc-400">Resultados parciales</p>';
+  }
+  ASST_GROUPS.forEach(g => {
+    const all = r.list.filter(x => x.d.type === g.type && x !== top);
+    if (!all.length) return;
+    const shown = all.slice(0, ASST.expanded[g.type] ? 60 : ASST_CAP);
+    let rows = shown.map(x => asstDocRow(mark(add({ kind: 'doc', doc: x.d })), x.d, r.toks)).join('');
+    if (all.length > shown.length) rows += asstMoreRow(add({ kind: 'more', group: g.type }), all.length - shown.length);
+    h += asstSection(g.label, rows, asstCount(all.length));
+  });
+
+  if (firstIdx < 0) {
+    h += '<div class="px-4 py-8 text-center anim-fade-in">' +
+      '<div class="mx-auto grid size-11 place-items-center rounded-2xl bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500">' + icon('search-x', 'size-5') + '</div>' +
+      '<p class="mt-3 text-sm font-medium text-zinc-900 dark:text-zinc-100">Nada en la app con «' + esc(q) + '»</p></div>';
+  }
+
+  // Sin Gemini, la búsqueda del directorio en el servidor queda como opción discreta al final
+  if (!gem && canAsk) {
+    askIdx = add({ kind: 'ask' });
+    h += asstSection('Más opciones', asstRowHtml(askIdx, {
+      icon: 'text-search', tone: 'zinc',
+      title: 'Buscar en todo el directorio: <span class="text-zinc-600 dark:text-zinc-300">«' + esc(q) + '»</span>',
+      right: '<kbd class="' + CX.kbd + '">' + asstMod() + '</kbd><kbd class="' + CX.kbd + '">↵</kbd>',
+    }));
+  }
+
+  if (gem) ASST.def = asstIsQuestion(q) && askIdx >= 0 ? askIdx : firstIdx >= 0 ? firstIdx : askIdx >= 0 ? askIdx : driveIdx >= 0 ? driveIdx : 0;
+  else ASST.def = firstIdx >= 0 ? firstIdx : driveIdx >= 0 ? driveIdx : askIdx >= 0 ? askIdx : 0;
+  return h;
+}
+
+/* ---------- Respuesta del servidor (Gemini o directorio) ---------- */
+function asstAiHtml(ai, toks, add) {
+  const gem = ai.mode === 'ai';
+  if (ai.status === 'loading') {
+    return '<div class="mx-1 my-2 overflow-hidden rounded-xl border border-indigo-200/70 bg-gradient-to-b from-indigo-50/80 to-white p-4 anim-fade-in dark:border-indigo-500/20 dark:from-indigo-500/10 dark:to-zinc-900" role="status" aria-live="polite">' +
+      '<div class="flex items-center gap-2 text-xs font-medium text-indigo-700 dark:text-indigo-300">' + icon(gem ? 'sparkles' : 'text-search', 'size-3.5 shrink-0 animate-pulse') +
+      '<span>' + (gem ? 'Pensando…' : 'Buscando…') + '</span></div>' +
+      '<div class="mt-3 space-y-2"><div class="skeleton h-3 w-11/12 rounded"></div><div class="skeleton h-3 w-9/12 rounded"></div><div class="skeleton h-3 w-5/12 rounded"></div></div></div>';
+  }
+  if (ai.status === 'error') {
+    return '<div class="mx-1 my-2 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 anim-fade-in dark:border-red-500/30 dark:bg-red-500/10" role="alert">' +
+      icon('circle-x', 'mt-0.5 size-4 shrink-0 text-red-500') +
+      '<div class="min-w-0"><p class="text-sm font-medium text-red-800 dark:text-red-200">No se pudo completar la búsqueda</p>' +
+      '<p class="mt-0.5 break-words text-xs text-red-700/90 dark:text-red-300/90">' + esc(ai.msg || 'Error desconocido') + '</p></div></div>';
+  }
+
+  const r = ai.res || {};
+  // Sólo registros que esta persona puede ver (el servidor ya filtra; esto cubre datos que cambiaron después)
+  const sources = (Array.isArray(r.sources) ? r.sources : []).filter(asstSrcVisible);
+  const results = (Array.isArray(r.results) ? r.results : []).filter(asstSrcVisible);
+  let h = '';
+  if (r.mode === 'ai' && r.found && r.answer) {
+    h += '<div class="mx-1 my-2 rounded-xl border border-indigo-200/70 bg-gradient-to-b from-indigo-50/80 to-white p-4 shadow-sm anim-scale-in dark:border-indigo-500/20 dark:from-indigo-500/10 dark:to-zinc-900" role="status" aria-live="polite">' +
+      '<div class="flex items-center justify-between gap-2">' +
+        '<span class="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-700 dark:text-indigo-300">' + icon('sparkles', 'size-3.5') + 'Respuesta</span>' +
+        iconBtn({ icon: 'copy', action: 'assistant.copy', title: 'Copiar respuesta', cls: 'size-7 -my-1' }) +
+      '</div>' +
+      '<p class="mt-1.5 break-words text-[15px] leading-relaxed text-zinc-900 dark:text-zinc-50">' + asstLinkify(r.answer) + '</p>' +
+      (r.note ? '<p class="mt-2 flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">' + icon('triangle-alert', 'mt-px size-3.5 shrink-0') + '<span>' + esc(r.note) + '</span></p>' : '') +
+      '<p class="mt-3 flex items-start gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">' + icon('shield-check', 'mt-px size-3.5 shrink-0 text-emerald-500') +
+        '<span>Respuesta generada sólo con datos de la app.</span></p>' +
+      '</div>';
+    if (sources.length) h += asstSection('Fuentes citadas', sources.map(s => asstSrcRow(add({ kind: 'src', src: s }), s, toks)).join(''), asstCount(sources.length));
+    const cited = {};
+    sources.forEach(s => { cited[s.id] = 1; });
+    h += asstDirHtml(results.filter(s => !cited[s.id]), toks, add);
+    return h;
+  }
+
+  if (r.mode === 'ai') {
+    h += '<div class="mx-1 my-2 flex items-start gap-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4 anim-scale-in dark:border-zinc-800 dark:bg-zinc-800/40" role="status" aria-live="polite">' +
+      '<span class="grid size-8 shrink-0 place-items-center rounded-lg bg-white text-zinc-500 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-400 dark:ring-zinc-700">' + icon('circle-help', 'size-4') + '</span>' +
+      '<p class="min-w-0 self-center text-sm font-semibold text-zinc-900 dark:text-zinc-100">No encontré esa información en la app</p></div>';
+  } else if (r.note) {
+    h += '<div class="mx-1 my-2 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-xs text-amber-800 anim-fade-in dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300" role="status">' +
+      icon('triangle-alert', 'mt-px size-3.5 shrink-0') + '<span>' + esc(r.note) + '</span></div>';
+  }
+  if (results.length) h += asstDirHtml(results, toks, add);
+  else if (r.mode !== 'ai') {
+    h += '<div class="px-4 py-10 text-center anim-fade-in">' +
+      '<div class="mx-auto grid size-11 place-items-center rounded-2xl bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500">' + icon('search-x', 'size-5') + '</div>' +
+      '<p class="mt-3 text-sm font-medium text-zinc-900 dark:text-zinc-100">Sin resultados en el directorio</p></div>';
+  }
+  return h;
+}
+
+function asstDirHtml(list, toks, add) {
+  if (!list.length) return '';
+  const shown = list.slice(0, ASST.expanded.dir ? 40 : ASST_DIR_CAP);
+  let rows = shown.map(s => asstSrcRow(add({ kind: 'src', src: s }), s, toks)).join('');
+  if (list.length > shown.length) rows += asstMoreRow(add({ kind: 'more', group: 'dir' }), list.length - shown.length);
+  return asstSection('Resultados en el directorio', rows, asstCount(list.length));
+}
+
+// Ícono, tono y badge derecho según tipo (usa datos vivos de IDX cuando existen)
+function asstView(type, refId, url, pilar) {
+  const T = ASST_TYPE[type] || ASST_TYPE.task;
+  let ic = T.icon, tn = T.tone, right = pilar ? pillarBadge(pilar) : '';
+  if (type === 'task') {
+    const t = IDX.task && IDX.task.get(refId);
+    if (t) {
+      const k = dueInfo(t).key;
+      ic = k === 'done' ? 'circle-check' : 'list-todo';
+      tn = k === 'done' ? 'emerald' : k === 'overdue' ? 'red' : (k === 'today' || k === 'soon') ? 'amber' : 'indigo';
+      if (t.privada) right = '<span class="text-zinc-400 dark:text-zinc-500" title="Privada: sólo tú y el responsable la ven">' + icon('lock', 'size-3.5') + '</span>' + right;
+    }
+  } else if (type === 'project') {
+    const p = PIL(pilar);
+    if (p) tn = p.color;
+  } else if (type === 'evidence') {
+    ic = evidenceIcon(url);
+    right += icon('arrow-up-right', 'size-4 text-zinc-400');
+  } else if (type === 'cascade') {
+    const c = IDX.cascade && IDX.cascade.get(refId);
+    const meta = c && CLASE_META[c.clase];
+    if (meta) { ic = meta.icon; tn = meta.tone; }
+  }
+  return { icon: ic, tone: tn, right: right };
+}
+
+function asstDocRow(i, d, toks) {
+  const v = asstView(d.type, d.refId, d.url, d.pilar);
+  let sub;
+  if (d.type === 'comment') {
+    sub = asstSnippet(d.body, toks, true) + '<span class="text-zinc-400 dark:text-zinc-500"> — ' + esc(d.sub) + '</span>';
+  } else {
+    const head = asstWords(d.title + ' ' + d.sub);
+    const inBody = d.body && toks.some(t => !asstHas(head, t)) ? asstSnippet(d.body, toks, false) : '';
+    sub = inBody || asstHl(d.sub, toks);
+  }
+  return asstRowHtml(i, { icon: v.icon, tone: v.tone, title: asstHl(d.title, toks), sub: sub, right: v.right });
+}
+
+function asstSrcRow(i, s, toks) {
+  const v = asstView(s.type, s.refId, s.url, s.pilar);
+  return asstRowHtml(i, { icon: v.icon, tone: v.tone, title: asstHl(s.title, toks), sub: esc(s.subtitle || ''), right: v.right });
+}
+
+/* ---------- Acciones sobre filas ---------- */
+function asstActivate(i) {
+  const it = ASST.items[i];
+  if (!it) return;
+  if (it.kind === 'ask') { asstAsk(ASST.q); return; }
+  if (it.kind === 'drive') { asstDrive(ASST.q); return; }
+  if (it.kind === 'example') { asstSetQuery(it.q, false); asstAsk(it.q); return; }
+  if (it.kind === 'recent') { asstSetQuery(it.q, false); return; }
+  if (it.kind === 'more') { ASST.expanded[it.group] = true; ASST.active = i; asstRender(false); asstFocus(); return; }
+  if (it.kind === 'cmd') {
+    if (it.cmd.keep) { it.cmd.run(); ASST.active = i; asstRender(false); asstFocus(); return; }
+    ASST.picked = true;
+    asstClose();
+    it.cmd.run();
+    return;
+  }
+  const src = it.kind === 'doc' ? it.doc : it.src;
+  if (!src) return;
+  if (ASST.q.trim().length >= 2) asstRemember(ASST.q);
+  ASST.picked = true;
+  asstClose();
+  asstOpenDoc({ type: src.type, refId: src.refId, url: src.url });
+}
+
+// Abre el registro: tarea/proyecto/línea en su panel, link en pestaña nueva (y su registro), Cascade en el catálogo
+function asstOpenDoc(o) {
+  const ref = String(o.refId || '');
+  if (o.type === 'evidence') {
+    const u = safeUrl(o.url);
+    if (u) window.open(u, '_blank', 'noopener');
+    asstOpenRef(ref, false);
+    return;
+  }
+  if (o.type === 'cascade') { asstOpenCascade(ref); return; }
+  asstOpenRef(ref, o.type === 'comment');
+}
+
+// Catálogo Cascade en el pilar del indicador, con su grupo desplegado y (si es indicador) su panel abierto
+function asstOpenCascade(ref) {
+  const c = IDX.cascade && IDX.cascade.get(ref);
+  if (c && typeof admState === 'function') {
+    const A = admState();
+    A.pilar = c.pilar;
+    A.casQ = '';
+    A.open[c.padre || c.id] = true;
+  }
+  go('#/cascade');
+  if (c && c.padre && typeof openCascadeItem === 'function') openCascadeItem(c.id);
+}
+
+function asstOpenRef(ref, toComments) {
+  if (/^TSK-/.test(ref)) {
+    if (typeof openTask === 'function') openTask(ref); else asstOpenMyTasks();
+  } else if (/^PRJ-/.test(ref)) {
+    if (typeof openProject === 'function') openProject(ref, toComments ? { tab: 'comentarios' } : {}); else go(asstHome());
+  } else if (/^L-/.test(ref)) {
+    if (typeof openLine === 'function') {
+      openLine(ref);
+      if (toComments && currentDrawerKey() && ACTIONS['budget.lineTab']) ACTIONS['budget.lineTab']({ value: 'comentarios' });
+    } else go('#/presupuesto/lineas');
+  } else if (/^CAS-/.test(ref)) {
+    asstOpenCascade(ref);
+  } else {
+    toast('No encontré ese registro. Actualiza los datos e inténtalo de nuevo.', 'error');
+  }
+}
+
+// Abre la búsqueda de Google Drive (con su IA) en una pestaña nueva; Drive sólo recibe lo escrito
+function asstDrive(raw) {
+  const q = String(raw || '').trim().slice(0, 500);
+  if (q.length < 2) { toast('Escribe qué quieres buscar en Drive', 'info'); return; }
+  asstRemember(q);
+  window.open(ASST_DRIVE_URL + encodeURIComponent(q), '_blank', 'noopener');
+  asstClose();
+}
+
+// Consulta al servidor: Gemini si hay clave; si no, búsqueda del directorio con intenciones
+function asstAsk(raw) {
+  const q = String(raw || '').trim();
+  if (q.length < 2) { toast('Escribe al menos 2 caracteres', 'info'); return; }
+  if (q.length > 500) { toast('La pregunta es muy larga (máximo 500 caracteres)', 'error'); return; }
+  asstRemember(q);
+  const seq = ++ASST.seq;
+  const qn = asstKey(q);
+  const mode = asstGemini() ? 'ai' : 'search';
+  ASST.ai = { qn: qn, q: q, mode: mode, status: 'loading' };
+  ASST.active = -1;
+  ASST.expanded = {};
+  asstRender(true);
+  run('ask', q, { me: myEmail() }).then(res => {
+    if (seq !== ASST.seq) return;
+    res = res || {};
+    ASST.ai = { qn: qn, q: q, mode: res.mode || mode, status: 'done', res: res };
+    ASST.active = -1;
+    if (ASST.open) asstRender(true);
+  }).catch(e => {
+    if (seq !== ASST.seq) return;
+    ASST.ai = { qn: qn, q: q, mode: mode, status: 'error', msg: errMsg(e) };
+    ASST.active = -1;
+    if (ASST.open) asstRender(true);
+  });
+}
+
+/* ---------- Búsqueda local instantánea (sin servidor) ---------- */
+function asstDocs() {
+  // optimistic() cambia S en el lugar y rehace IDX: el mapa de tareas nuevo invalida el caché
+  if (ASST.docs && ASST.docsFor === S && ASST.docsIdx === IDX.task) return ASST.docs;
+  ASST.docs = asstBuildDocs();
+  ASST.docsFor = S;
+  ASST.docsIdx = IDX.task;
+  return ASST.docs;
+}
+
+// Un documento por registro y uno por link de evidencia; "tags" son palabras ocultas para encontrar por estado/vencimiento
+function asstBuildDocs() {
+  const docs = [];
+  const pilTags = k => { const p = PIL(k); return p ? p.label + (p.key === 'ec' ? ' residuos' : '') : ''; };
+  const t0 = todayStr();
+  const dow = ((parseYmd(t0) || new Date()).getDay() + 6) % 7;
+  const wFrom = addDays(t0, -dow), wTo = addDays(t0, 6 - dow);
+  const add = d => {
+    d.title = String(d.title || '(sin nombre)');
+    d.sub = String(d.sub || '');
+    d.body = String(d.body || '');
+    d.tt = asstWords(d.title, true);
+    d.tn = asstWords(d.title).join(' ');
+    d.hay = asstUniq(d.tt.concat(asstWords(d.sub + ' ' + d.body + ' ' + (d.tags || ''), true)));
+    docs.push(d);
+  };
+  const addEvidence = (parent, kind) => (parent.evidencias || []).forEach((ev, i) => {
+    const u = safeUrl(ev && ev.u);
+    if (!u) return;
+    add({
+      key: parent.id + ':ev' + (i + 1), type: 'evidence', refId: parent.id, url: u, pilar: parent.pilar,
+      title: (ev.t || '').trim() || shortUrl(u),
+      sub: (kind === 'task' ? 'Tarea' : 'Proyecto') + ' «' + parent.nombre + '» · ' + shortUrl(u),
+      tags: 'evidencia link ' + asstKindWords(u) + ' ' + pilTags(parent.pilar) + ' ' + (parent.resp ? userName(parent.resp) : ''),
+      prio: 0.1,
+    });
+  });
+
+  (S.tasks || []).forEach(t => {
+    const p = t.proyecto ? IDX.project.get(t.proyecto) : null;
+    const di = dueInfo(t);
+    const pending = t.estado !== 'Realizada';
+    const inWeek = pending && t.fecha && t.fecha >= wFrom && t.fecha <= wTo;
+    add({
+      key: t.id, type: 'task', refId: t.id, pilar: t.pilar,
+      title: t.nombre,
+      sub: [p ? p.nombre : '', t.resp ? userName(t.resp) : 'Sin asignar',
+        pending ? di.label : 'Realizada' + (t.completada ? ' ' + fmtDateShort(t.completada) : '')].filter(Boolean).join(' · '),
+      body: [t.detalle, pending ? '' : t.cierre].filter(Boolean).join(' — '),   // el cierre de una tarea reabierta ya no vale
+      tags: ['tarea', t.estado, pilTags(t.pilar), cascadeLabel(t.cascade), t.privada ? 'privada' : '', t.pilar ? '' : 'personal',
+        di.key === 'overdue' ? 'vencida atrasada vence' : '', di.key === 'today' ? 'hoy vence' : '',
+        di.key === 'soon' ? 'pronto vence' : '', inWeek ? 'semana vence' : ''].join(' '),
+      prio: !pending ? -0.4 : (di.key === 'overdue' || di.key === 'today') ? 1 : di.key === 'soon' ? 0.8 : 0.5,
+    });
+    addEvidence(t, 'task');
+  });
+
+  (S.projects || []).forEach(p => {
+    const st = projectStats(p);
+    add({
+      key: p.id, type: 'project', refId: p.id, pilar: p.pilar,
+      title: p.nombre,
+      sub: [p.estado || 'Activo', p.resp ? userName(p.resp) : 'Sin asignar',
+        st.pending ? plural(st.pending, 'tarea pendiente', 'tareas pendientes') : (st.tasks ? 'Sin pendientes' : '')].filter(Boolean).join(' · '),
+      body: p.detalle || '',
+      tags: ['proyecto', pilTags(p.pilar), cascadeLabel(p.cascade), p.anio || '', st.lines.map(l => l.proj).join(' ')].join(' '),
+      prio: p.estado === 'Cerrado' ? -0.4 : p.estado === 'En pausa' ? 0 : 0.4,
+    });
+    addEvidence(p, 'project');
+  });
+
+  Object.keys(S.budget || {}).forEach(y => (S.budget[y] || []).forEach(l => {
+    add({
+      key: l.id, type: 'line', refId: l.id, pilar: l.pilar,
+      title: l.proj,
+      sub: 'Línea ' + l.year + ' · Pagado ' + fmtMoney(l.pg) + ' de ' + fmtMoney(l.pf),
+      body: l.nota || '',
+      tags: ['linea presupuesto', l.year, pilTags(l.pilar || l.area), l.clas, l.estado, l.alerta, l.resp ? userName(l.resp) : ''].join(' '),
+      prio: (String(l.year) === String(S.year) ? 0.3 : 0) - (l.pf > 0 ? 0 : 0.3),
+    });
+  }));
+
+  (S.comments || []).forEach(c => {
+    if (!asstRefVisible(c.ref)) return;   // comentario de una tarea privada que no veo (el servidor ya los omite)
+    const ent = IDX.task.get(c.ref) || IDX.project.get(c.ref) || null;
+    const line = ent ? null : IDX.line.get(c.ref);
+    const name = ent ? ent.nombre : line ? line.proj : 'registro eliminado';
+    add({
+      key: c.id, type: 'comment', refId: c.ref, pilar: ent ? ent.pilar : line ? line.pilar : '',
+      title: 'Comentario en ' + name,
+      sub: userName(c.autor) + ' · ' + fmtRel(c.creado),
+      body: c.texto || '',
+      tags: 'comentario ' + userName(c.autor) + ' ' + pilTags(ent ? ent.pilar : line ? line.pilar : ''),
+      prio: -0.2,
+    });
+  });
+
+  (S.cascade || []).forEach(c => {
+    const meta = CLASE_META[c.clase] || CLASE_META.accion;
+    const g = c.padre ? IDX.cascade.get(c.padre) : null;
+    const p = PIL(c.pilar);
+    add({
+      key: c.id, type: 'cascade', refId: c.id, pilar: c.pilar,
+      title: c.nombre,
+      sub: [meta.label, g ? g.nombre : (p ? p.label : '')].filter(Boolean).join(' · '),
+      body: c.etiqueta || '',
+      tags: 'cascade indicador ' + pilTags(c.pilar),
+      prio: c.padre ? 0 : -0.3,
+    });
+  });
+  return docs;
+}
+
+// AND de todas las palabras (prefijo); si nada calza, coincidencias parciales (≥ la mitad)
+function asstSearch(q) {
+  const toks = asstQueryToks(q);
+  const res = { toks: toks, list: [], partial: false };
+  if (!toks.length) return res;
+  const qn = asstKey(q);
+  const scored = [];
+  asstDocs().forEach(d => {
+    let s = 0, miss = 0;
+    toks.forEach(t => {
+      if (asstHas(d.tt, t)) s += d.tt.indexOf(t) >= 0 ? 4 : 3;
+      else if (asstHas(d.hay, t)) s += 1;
+      else miss++;
+    });
+    if (miss === toks.length) return;
+    if (qn.length > 1 && d.tn.indexOf(qn) === 0) s += 3;
+    else if (qn.length > 2 && d.tn.indexOf(qn) > 0) s += 1.5;
+    scored.push({ d: d, s: s + (d.prio || 0), miss: miss });
+  });
+  let list = scored.filter(x => !x.miss);
+  if (!list.length && toks.length >= 2) {
+    const max = Math.floor(toks.length / 2);
+    list = scored.filter(x => x.miss <= max);
+    res.partial = list.length > 0;
+  }
+  list.sort((a, b) => (a.miss - b.miss) || (b.s - a.s) || a.d.title.localeCompare(b.d.title, 'es'));
+  res.list = list;
+  return res;
+}
+
+function asstQueryToks(q) {
+  const stop = asstStopSet();
+  const me = myEmail();
+  const meTok = me ? asstWords(userName(me))[0] : '';
+  const out = [];
+  asstWords(q).forEach(w => {
+    if (ASST_ME_WORDS[w]) { if (meTok && out.indexOf(meTok) < 0) out.push(meTok); return; }
+    if (stop[w]) return;
+    const s = asstStem(w);
+    if (s && out.indexOf(s) < 0) out.push(s);
+  });
+  return out;
+}
+
+/* ---------- Texto: normalización, resaltado y fragmentos ---------- */
+function asstWords(s, dropStop) {
+  const n = normTxt(s).replace(/[^a-z0-9]+/g, ' ').trim();
+  if (!n) return [];
+  const w = n.split(' ');
+  if (!dropStop) return w;
+  const st = asstStopSet();
+  return w.filter(x => !st[x]);
+}
+
+// Igual que aiStem_ en Asistente.gs: humedales→humedal, acciones→accion, bonos→bono
+function asstStem(w) {
+  if (/^\d+$/.test(w)) return w;
+  if (w.length > 4 && /[lrndzjsy]es$/.test(w)) return w.slice(0, -2);
+  if (w.length > 3 && /[aeiou]s$/.test(w)) return w.slice(0, -1);
+  return w;
+}
+
+function asstStopSet() {
+  if (!ASST_MEMO.stop) {
+    const m = {};
+    ASST_STOPWORDS.split(' ').forEach(w => { if (w) m[w] = 1; });
+    ASST_MEMO.stop = m;
+  }
+  return ASST_MEMO.stop;
+}
+
+function asstHas(words, t) {
+  for (let i = 0; i < words.length; i++) if (words[i].indexOf(t) === 0) return true;
+  return false;
+}
+
+function asstUniq(arr) {
+  const seen = {};
+  return arr.filter(x => { if (!x || seen[x]) return false; seen[x] = 1; return true; });
+}
+
+function asstKey(q) { return asstWords(q).join(' '); }
+
+// Texto normalizado + mapa de posiciones al original (para resaltar sin perder tildes)
+function asstNormMap(s) {
+  let norm = '';
+  const map = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i].normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    for (let j = 0; j < c.length; j++) { norm += c[j]; map.push(i); }
+  }
+  return { norm: norm, map: map };
+}
+
+// Escapa el texto y marca las palabras que empiezan con algún término buscado
+function asstHl(text, toks) {
+  const s = String(text == null ? '' : text);
+  if (!s || !toks || !toks.length) return esc(s);
+  const nm = asstNormMap(s);
+  const norm = nm.norm, map = nm.map;
+  const mark = new Uint8Array(s.length);
+  const isW = ch => !!ch && /[a-z0-9]/.test(ch);
+  toks.forEach(t => {
+    if (!t) return;
+    let from = 0, at;
+    while ((at = norm.indexOf(t, from)) >= 0) {
+      if (!isW(norm[at - 1])) {
+        let end = at + t.length;
+        while (end < norm.length && isW(norm[end])) end++;
+        for (let k = at; k < end; k++) mark[map[k]] = 1;
+      }
+      from = at + 1;
+    }
+  });
+  let out = '', on = false;
+  for (let i = 0; i < s.length; i++) {
+    if (mark[i] && !on) { out += '<mark class="hl">'; on = true; }
+    else if (!mark[i] && on) { out += '</mark>'; on = false; }
+    out += esc(s[i]);
+  }
+  return out + (on ? '</mark>' : '');
+}
+
+// Fragmento de ~120 caracteres alrededor de la primera coincidencia (force: desde el inicio si no hay)
+function asstSnippet(text, toks, force) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  const nm = asstNormMap(s);
+  let pos = -1;
+  toks.forEach(t => {
+    let from = 0, at;
+    while ((at = nm.norm.indexOf(t, from)) >= 0) {
+      if (at === 0 || !/[a-z0-9]/.test(nm.norm[at - 1])) { if (pos < 0 || at < pos) pos = at; break; }
+      from = at + 1;
+    }
+  });
+  if (pos < 0 && !force) return '';
+  const p0 = pos < 0 ? 0 : (nm.map[pos] || 0);
+  const start = Math.max(0, p0 - 28);
+  const cut = s.slice(start, start + 120);
+  return (start > 0 ? '…' : '') + asstHl(cut, toks) + (start + 120 < s.length ? '…' : '');
+}
+
+// Escapa y convierte en link sólo URLs http(s) válidas (safeUrl)
+function asstLinkify(text) {
+  const s = String(text || '');
+  const re = /https?:\/\/[^\s<>"'`]+/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(s))) {
+    let u = m[0], tail = '';
+    while (/[.,;:!?)\]»”]$/.test(u)) { tail = u.slice(-1) + tail; u = u.slice(0, -1); }
+    out += esc(s.slice(last, m.index));
+    const su = safeUrl(u);
+    out += su
+      ? '<a href="' + esc(su) + '" target="_blank" rel="noopener noreferrer" title="' + esc(su) + '" class="font-medium text-indigo-600 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-500 dark:text-indigo-400 dark:decoration-indigo-500/40">' + esc(shortUrl(su)) + '</a>'
+      : esc(u);
+    out += esc(tail);
+    last = m.index + m[0].length;
+  }
+  return out + esc(s.slice(last));
+}
+
+function asstKindWords(u) {
+  const s = String(u || '').toLowerCase();
+  return [
+    /spreadsheets|\.xlsx?\b|\.csv\b/.test(s) ? 'planilla hoja excel sheet' : '',
+    /\/document\/|\.docx?\b/.test(s) ? 'documento doc word' : '',
+    /\/presentation\/|\.pptx?\b/.test(s) ? 'presentacion ppt slides' : '',
+    /\/folders\//.test(s) ? 'carpeta folder' : '',
+    /\.pdf\b/.test(s) ? 'pdf' : '',
+    /drive\.google|docs\.google/.test(s) ? 'drive archivo' : '',
+  ].join(' ');
+}
+
+/* ---------- Varios ---------- */
+function asstGemini() { return !!(S && S.config && S.config.geminiEnabled); }
+
+function asstAdmin() { return typeof isAdminUI === 'function' ? isAdminUI() : !!(S && S.me && S.me.admin); }
+
+function asstHome() { return typeof homeRoute === 'function' ? homeRoute() : '#/gestion/cc'; }
+
+// Privacidad: una referencia a una tarea sólo vale si la tarea está en mis datos (S trae sólo las visibles)
+function asstRefVisible(ref) {
+  const r = String(ref || '');
+  return !/^TSK-/.test(r) || !!(IDX.task && IDX.task.has(r));
+}
+function asstSrcVisible(s) { return !!s && asstRefVisible(s.refId) && asstRefVisible(String(s.id || '').split(':')[0]); }
+
+// Una respuesta guardada sólo se restaura si todas sus fuentes siguen visibles para mí
+function asstAiStillVisible(ai) {
+  const r = (ai && ai.res) || {};
+  return [].concat(Array.isArray(r.sources) ? r.sources : [], Array.isArray(r.results) ? r.results : []).every(asstSrcVisible);
+}
+
+function asstMac() { return /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || ''); }
+function asstMod() { return asstMac() ? '⌘' : 'Ctrl'; }
+function asstAlt() { return asstMac() ? '⌥' : 'Alt'; }
+
+function asstIsQuestion(q) {
+  if (/[?¿]/.test(q)) return true;
+  const w = asstWords(q);
+  if (w.length >= 5) return true;
+  return /^(que|cual|cuales|cuando|cuanto|cuanta|cuantos|cuantas|donde|quien|quienes|como|hay|tenemos|existe|dame|dime|muestrame|necesito)$/.test(w[0] || '');
+}
+
+function asstRecent() {
+  const v = LS.get(ASST_RECENT_KEY, []);
+  return Array.isArray(v) ? v.filter(x => typeof x === 'string' && x.trim()).slice(0, ASST_RECENT_MAX) : [];
+}
+
+function asstRemember(q) {
+  q = String(q || '').trim().slice(0, 200);
+  if (q.length < 2) return;
+  const k = asstKey(q);
+  const list = asstRecent().filter(x => asstKey(x) !== k);
+  list.unshift(q);
+  LS.set(ASST_RECENT_KEY, list.slice(0, ASST_RECENT_MAX));
+}
+
+function asstForget(q) {
+  const k = asstKey(q);
+  LS.set(ASST_RECENT_KEY, asstRecent().filter(x => asstKey(x) !== k));
+}
+</script>

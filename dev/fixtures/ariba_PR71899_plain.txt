@@ -1,0 +1,32 @@
+Solicitud de compra
+Es necesaria una acción por su parte
+Este/esta solicitud de compra que MARÍA JOSÉ PÉREZ SOTO ha enviado , requiere su aprobación.
+Motivo: Responsable CECO
+Haga clic en Aprobar o Denegar para aprobar o denegar Solicitud de compra,y escriba sus comentarios en el mensaje de correo electrónico que se abrirá. Para ver Solicitud de compra en la solución de Ariba, haga clic en Ver
+
+En representación de	MARÍA JOSÉ PÉREZ SOTO
+Solicitud de compra	PR71899 - Estudio huella hídrica en plantas de lubricantes
+Creado	lunes, 6 julio, 2026 a las 9:05, CLT
+Importe total	$4.512.880 CLP
+Este documento tiene adjuntos.
+Aprobar <mailto:buyerapproval-prod+copec-ss-c1@ansmtp.ariba.com?subject=Aprobar%20PR71899&body=*** Approve ***> Denegar <mailto:buyerapproval-prod+copec-ss-c1@ansmtp.ariba.com?subject=Denegar%20PR71899&body=*** Deny ***> Ver <https://s1.ariba.com/Buyer/Main/ad/webjumper?realm=copec-ss-c1&itemID=PR71899>
+
+Detalles de cabecera
+Max Approval Amount	114,25 CLF
+Artículos en línea
+1	Descripción	Estudio de huella hídrica y balance de agua en plantas de lubricantes
+Asignación de cuentas	K(Centro de coste)
+Proveedor	CONSULTORA AGUAS CLARAS LTDA.
+Entregar a	María José Pérez
+Ctd.	1,00	Unidad	cada uno	Precio	114,25 CLF	Importe	114,25 CLF
+Cuenta contable	Centro de costes	Tipo	Proporción
+0005602585(Est. y Asesorías por Cumplim. Normativas)	XUF80853(PROY.CAMBIOS CLIMA)	Importe	114,25 CLF
+
+Comentarios recientes
+lunes, 6 julio, 2026 a las 9:10, CLT: MARÍA JOSÉ PÉREZ SOTO - Estudio comprometido en el plan de agua 2026; adjunto cotización.
+Flujo de aprobación (A partir de lunes, 6 julio, 2026 a las 11:30, CLT)
+Estado	Necesario	Motivo	Responsable de aprobación	Fecha Hora
+Listo para su aprobación	Sí	Responsable CECO	GONZALO EDUARDO VICENCIO SANCHEZ
+
+Ahora puede aprobar solicitudes de compra desde un dispositivo móvil. Obtenga hoy mismo la aplicación SAP Ariba Procurement.
+Derechos de autor © 2005 - 2026 Ariba, Inc., Todos los derechos reservados.

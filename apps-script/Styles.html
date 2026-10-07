@@ -1,0 +1,130 @@
+<style type="text/tailwindcss">
+  @custom-variant dark (&:where(.dark, .dark *));
+
+  @theme {
+    --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  @layer base {
+    *, ::after, ::before, ::backdrop, ::file-selector-button { border-color: var(--color-zinc-200); }
+    .dark *, .dark ::after, .dark ::before { border-color: var(--color-zinc-800); }
+    button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+    html, body { height: 100%; }
+  }
+</style>
+<style>
+  /* ---------- Móvil sin zoom (v3.4): sin zoom con doble toque; el meta viewport de doGet y Core evitan el resto ---------- */
+  html { touch-action: manipulation; }
+
+  /* ---------- Deslizar hacia abajo para actualizar (celular, v3.4) ---------- */
+  /* v3.5: sin «Atrás / Adelante» del navegador al deslizar de lado (Chrome); los gestos laterales los maneja Core */
+  html, body { overscroll-behavior-x: none; }
+  #view { overscroll-behavior-y: contain; overscroll-behavior-x: none; }
+  .ptr { position: absolute; left: 50%; top: 3.5rem; z-index: 15; pointer-events: none; opacity: 0; transform: translate(-50%, -44px); transition: transform .22s ease, opacity .22s ease; }
+  .ptr[data-state="pull"], .ptr[data-state="ready"] { transition: none; }
+  .ptr-dot { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 9999px; background: #fff; color: #6366f1; box-shadow: 0 6px 16px -6px rgba(0,0,0,.3), 0 0 0 1px rgba(0,0,0,.06); transition: background-color .15s, color .15s; }
+  .dark .ptr-dot { background: #27272a; color: #a5b4fc; box-shadow: 0 6px 16px -6px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.08); }
+  .ptr[data-state="ready"] .ptr-dot, .ptr[data-state="busy"] .ptr-dot { background: #6366f1; color: #fff; }
+  .ptr svg { transition: transform .1s linear; }
+  .ptr[data-state="busy"] svg { animation: aacc-ptr-spin .75s linear infinite; }
+  @keyframes aacc-ptr-spin { to { transform: rotate(360deg); } }
+
+  /* ---------- Arrastrar tareas (v3.6) ---------- */
+  /* Celular: mantener presionada una tarea no abre el menú del navegador ni selecciona texto */
+  @media (pointer: coarse) { [data-todo-row] { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; } }
+  /* Proyecto bajo una tarea arrastrada desde «Mis tareas» */
+  [data-drop-project] { transition: box-shadow .15s ease, background-color .15s ease; }
+  [data-drop-project][data-drop-on] { box-shadow: 0 0 0 2px #6366f1, 0 10px 24px -12px rgb(79 70 229 / .45); background-color: #eef2ff; }
+  .dark [data-drop-project][data-drop-on] { box-shadow: 0 0 0 2px #818cf8, 0 10px 24px -12px rgb(0 0 0 / .7); background-color: rgb(99 102 241 / .12); }
+  /* Chip que sigue al puntero fuera del panel */
+  .todo-ghost { position: fixed; left: 0; top: 0; z-index: 70; pointer-events: none; display: flex; align-items: center; gap: 6px; max-width: 280px; padding: 6px 10px; border-radius: 9999px; background: #fff; color: #3f3f46; font: 500 12px/1.2 Inter, system-ui, sans-serif; box-shadow: 0 10px 28px -10px rgb(24 24 27 / .35), 0 0 0 1px rgb(24 24 27 / .08); transition: background-color .12s, color .12s; }
+  .dark .todo-ghost { background: #27272a; color: #e4e4e7; box-shadow: 0 10px 28px -10px rgb(0 0 0 / .7), 0 0 0 1px rgb(255 255 255 / .08); }
+  .todo-ghost[data-on] { background: #4f46e5; color: #fff; }
+
+  /* ---------- Animaciones (se desactivan con prefers-reduced-motion) ---------- */
+  @keyframes aacc-fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  @keyframes aacc-fade-out { to { opacity: 0; } }
+  @keyframes aacc-slide-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @keyframes aacc-scale-in { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
+  @keyframes aacc-scale-out { to { opacity: 0; transform: translateY(4px) scale(.98); } }
+  @keyframes aacc-drawer-in { from { transform: translateX(100%); } to { transform: none; } }
+  @keyframes aacc-drawer-out { to { transform: translateX(100%); } }
+  @keyframes aacc-toast-in { from { opacity: 0; transform: translateY(12px) scale(.97); } to { opacity: 1; transform: none; } }
+  @keyframes aacc-toast-out { to { opacity: 0; transform: translateY(6px); } }
+  @keyframes aacc-shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+  @keyframes aacc-bar-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @keyframes aacc-progress { 0% { left: -35%; right: 100%; } 60% { left: 100%; right: -90%; } 100% { left: 100%; right: -90%; } }
+  @keyframes aacc-pop { 0% { transform: scale(1); } 40% { transform: scale(1.18); } 100% { transform: scale(1); } }
+
+  .anim-fade-in { animation: aacc-fade-in .22s ease-out both; }
+  .anim-fade-out { animation: aacc-fade-out .15s ease-in both; }
+  .anim-slide-up { animation: aacc-slide-up .38s cubic-bezier(.2, .8, .2, 1) both; }
+  .anim-scale-in { animation: aacc-scale-in .2s cubic-bezier(.2, .8, .2, 1) both; }
+  .anim-scale-out { animation: aacc-scale-out .14s ease-in both; }
+  .anim-drawer-in { animation: aacc-drawer-in .28s cubic-bezier(.2, .8, .2, 1) both; }
+  .anim-drawer-out { animation: aacc-drawer-out .17s ease-in both; }
+  .anim-toast-in { animation: aacc-toast-in .24s cubic-bezier(.2, .8, .2, 1) both; }
+  .anim-toast-out { animation: aacc-toast-out .2s ease-in both; }
+  .anim-pop { animation: aacc-pop .32s ease-out; }
+
+  /* Escalonado para grillas de tarjetas */
+  .stagger > .anim-slide-up:nth-child(2) { animation-delay: .04s; }
+  .stagger > .anim-slide-up:nth-child(3) { animation-delay: .08s; }
+  .stagger > .anim-slide-up:nth-child(4) { animation-delay: .12s; }
+  .stagger > .anim-slide-up:nth-child(5) { animation-delay: .16s; }
+  .stagger > .anim-slide-up:nth-child(6) { animation-delay: .2s; }
+  .stagger > .anim-slide-up:nth-child(n+7) { animation-delay: .24s; }
+
+  /* Barras: crecen sólo al entrar a una vista (no en cada actualización) */
+  .bar-grow { transform-origin: left center; transition: width .5s cubic-bezier(.2, .8, .2, 1); }
+  .anim-fade-in .bar-grow { animation: aacc-bar-grow .8s cubic-bezier(.2, .8, .2, 1) both; }
+
+  .lift { transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
+  .lift:hover { transform: translateY(-2px); box-shadow: 0 8px 24px -12px rgb(0 0 0 / .18); }
+  .dark .lift:hover { box-shadow: 0 8px 24px -12px rgb(0 0 0 / .6); }
+
+  .skeleton {
+    background: linear-gradient(90deg, #e4e4e7 25%, #f4f4f5 37%, #e4e4e7 63%);
+    background-size: 400% 100%;
+    animation: aacc-shimmer 1.4s ease infinite;
+  }
+  .dark .skeleton { background: linear-gradient(90deg, #27272a 25%, #3f3f46 37%, #27272a 63%); background-size: 400% 100%; }
+
+  /* Barra de progreso superior (guardando…) */
+  .top-progress { position: fixed; inset: 0 0 auto 0; height: 2px; z-index: 100; overflow: hidden; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .top-progress::before { content: ""; position: absolute; top: 0; bottom: 0; background: linear-gradient(90deg, #6366f1, #22d3ee); animation: aacc-progress 1.1s ease-in-out infinite; }
+  .top-progress.is-active { opacity: 1; }
+
+  /* Scrollbars discretas */
+  * { scrollbar-width: thin; scrollbar-color: rgb(161 161 170 / .45) transparent; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: rgb(161 161 170 / .45); border-radius: 999px; border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* Texto con varias líneas recortado */
+  .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+  /* Resaltado de coincidencias del buscador */
+  mark.hl { background: rgb(250 204 21 / .35); color: inherit; border-radius: 3px; padding: 0 1px; }
+  .dark mark.hl { background: rgb(250 204 21 / .25); }
+
+  input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
+
+  /* ---------- Check de tareas ---------- */
+  .chk .chk-mark path { stroke-dasharray: 16; stroke-dashoffset: 16; transition: stroke-dashoffset .28s cubic-bezier(.65, 0, .35, 1) .05s; }
+  .chk.chk-done .chk-mark path { stroke-dashoffset: 0; }
+  .chk:not(.chk-done):hover .chk-mark path { stroke-dashoffset: 0; opacity: .35; }
+  @keyframes aacc-chk-pop { 0% { transform: scale(1); } 35% { transform: scale(.82); } 70% { transform: scale(1.18); } 100% { transform: scale(1); } }
+  .chk-pop { animation: aacc-chk-pop .45s cubic-bezier(.34, 1.56, .64, 1); }
+  .chk-burst { position: absolute; inset: 50% auto auto 50%; pointer-events: none; }
+  .chk-burst i { position: absolute; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 999px; opacity: 0; animation: aacc-burst .65s cubic-bezier(.2, .8, .2, 1) forwards; }
+  @keyframes aacc-burst { 0% { opacity: 1; transform: translate(0, 0) scale(1); } 100% { opacity: 0; transform: translate(var(--dx), var(--dy)) scale(.4); } }
+  /* Fila que se completa: el texto se tacha suavemente y se atenúa */
+  [data-task-row] .task-title { background: linear-gradient(currentColor, currentColor) no-repeat 0 55% / 0 1.5px; transition: background-size .35s ease, color .35s ease, opacity .35s ease; }
+  [data-task-row].row-completing .task-title { background-size: 100% 1.5px; opacity: .55; }
+  [data-task-row].row-completing { transition: opacity .3s ease .25s; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, ::before, ::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+  }
+</style>

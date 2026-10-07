@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<script>
+  // Tema antes del primer pintado (localStorage puede fallar dentro del iframe de Apps Script)
+  (function () {
+    var p = 'system';
+    try { p = JSON.parse(localStorage.getItem('aacc.theme')) || 'system'; } catch (e) {}
+    var d = p === 'dark' || (p !== 'light' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.classList.toggle('dark', d);
+    document.documentElement.style.colorScheme = d ? 'dark' : 'light';
+  })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>
+<?!= include('Styles'); ?>
+<script src="https://unpkg.com/lucide@1.50.0/dist/umd/lucide.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" defer></script>
+</head>
+<body class="bg-zinc-50 font-sans text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100">
+<div id="top-progress" class="top-progress" aria-hidden="true"></div>
+
+<div id="app" class="is-booting flex h-dvh overflow-hidden">
+  <div id="sidebar-overlay" class="fixed inset-0 z-30 hidden bg-zinc-950/40 backdrop-blur-sm lg:hidden" data-action="nav.close"></div>
+
+  <aside id="sidebar" class="fixed inset-y-0 left-0 z-40 flex w-64 shrink-0 -translate-x-full flex-col border-r border-zinc-200 bg-zinc-100 transition-transform duration-200 lg:static lg:translate-x-0 dark:border-zinc-800 dark:bg-zinc-900">
+    <div class="flex h-14 shrink-0 items-center gap-2.5 px-4">
+      <div class="grid size-8 place-items-center rounded-lg bg-gradient-to-br from-emerald-500 via-teal-500 to-sky-500 text-white shadow-sm ring-1 ring-black/5">
+        <i data-lucide="sprout" class="size-4"></i>
+      </div>
+      <div class="min-w-0 leading-tight">
+        <p class="truncate text-sm font-semibold tracking-tight text-zinc-900 dark:text-white">Cuadre AACC</p>
+        <p class="truncate text-[11px] text-zinc-500 dark:text-zinc-400">Sostenibilidad · Asuntos Corporativos</p>
+      </div>
+      <button type="button" class="ml-auto grid size-8 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-200 lg:hidden dark:hover:bg-zinc-800" data-action="nav.close" aria-label="Cerrar menú"><i data-lucide="x" class="size-4"></i></button>
+    </div>
+    <nav id="sidebar-nav" class="flex-1 overflow-y-auto px-2 py-3" aria-label="Navegación principal">
+      <div class="space-y-2 px-3 py-2">
+        <div class="skeleton h-3 w-20 rounded"></div><div class="skeleton h-7 rounded-lg"></div><div class="skeleton h-7 rounded-lg"></div>
+        <div class="skeleton mt-6 h-3 w-16 rounded"></div><div class="skeleton h-7 rounded-lg"></div><div class="skeleton h-7 rounded-lg"></div><div class="skeleton h-7 rounded-lg"></div>
+      </div>
+    </nav>
+    <div id="sidebar-me" class="flex shrink-0 items-center gap-3 border-t border-zinc-200 px-4 py-3 dark:border-zinc-800"></div>
+  </aside>
+
+  <div class="relative flex min-w-0 flex-1 flex-col">
+    <header class="z-20 flex h-14 shrink-0 items-center gap-2 border-b border-zinc-200 bg-white/80 px-3 backdrop-blur-md sm:px-5 dark:border-zinc-800 dark:bg-zinc-950/70">
+      <button type="button" class="grid size-9 place-items-center rounded-lg text-zinc-600 hover:bg-zinc-100 lg:hidden dark:text-zinc-300 dark:hover:bg-zinc-800" data-action="nav.toggle" aria-label="Abrir menú">
+        <i data-lucide="menu" class="size-5"></i>
+      </button>
+      <button type="button" data-action="assistant.open" class="group flex h-9 min-w-0 max-w-md flex-1 items-center gap-2 rounded-lg border border-zinc-200 bg-zinc-50 px-3 text-left text-sm text-zinc-500 transition hover:border-zinc-300 hover:bg-white hover:text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-zinc-200">
+        <i data-lucide="sparkles" class="size-4 shrink-0 text-indigo-500 dark:text-indigo-400"></i>
+        <span class="truncate">Buscar o preguntar…</span>
+        <span class="ml-auto hidden shrink-0 items-center gap-0.5 sm:flex"><kbd class="rounded border border-zinc-300 bg-white px-1.5 font-sans text-[10px] font-medium text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">⌘</kbd><kbd class="rounded border border-zinc-300 bg-white px-1.5 font-sans text-[10px] font-medium text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">K</kbd></span>
+      </button>
+      <div class="ml-auto flex shrink-0 items-center gap-1 sm:gap-1.5">
+        <span id="sync-state" class="hidden items-center gap-1.5 px-1 text-xs text-zinc-500 md:flex dark:text-zinc-400"></span>
+        <label class="relative" title="Año">
+          <span class="pointer-events-none absolute inset-y-0 left-2.5 grid place-items-center text-zinc-400"><i data-lucide="calendar" class="size-4"></i></span>
+          <select id="year-select" data-change="year.set" aria-label="Año" class="h-9 appearance-none rounded-lg border-0 bg-white py-0 pl-8 pr-7 text-sm font-semibold tabular-nums text-zinc-800 shadow-sm ring-1 ring-inset ring-zinc-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-zinc-900 dark:text-zinc-100 dark:ring-zinc-800">
+            <option>—</option>
+          </select>
+          <span class="pointer-events-none absolute inset-y-0 right-2 grid place-items-center text-zinc-400"><i data-lucide="chevron-down" class="size-3.5"></i></span>
+        </label>
+        <button type="button" data-action="data.refresh" class="grid size-9 place-items-center pointer-coarse:hidden rounded-lg text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white" title="Actualizar datos" aria-label="Actualizar datos">
+          <i data-lucide="refresh-cw" class="size-4"></i>
+        </button>
+        <button type="button" id="theme-btn" data-action="theme.toggle" class="grid size-9 place-items-center rounded-lg text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white" title="Modo claro / oscuro" aria-label="Cambiar tema">
+          <i data-lucide="moon" class="size-4"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Deslizar hacia abajo para actualizar (celular): indicador que baja con el dedo y gira mientras actualiza -->
+    <div id="ptr" class="ptr" data-state="idle" aria-hidden="true"><span class="ptr-dot"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></span></div>
+    <main id="view" class="flex-1 overflow-y-auto" tabindex="-1">
+      <div class="mx-auto w-full max-w-7xl px-4 pt-6 sm:px-6 lg:px-8">
+        <div class="flex items-center gap-3"><div class="skeleton size-11 rounded-xl"></div><div class="flex-1 space-y-2"><div class="skeleton h-3 w-24 rounded"></div><div class="skeleton h-6 w-64 rounded"></div></div></div>
+        <div class="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div class="skeleton h-24 rounded-xl"></div><div class="skeleton h-24 rounded-xl"></div><div class="skeleton h-24 rounded-xl"></div><div class="skeleton h-24 rounded-xl"></div>
+        </div>
+        <div class="skeleton mt-6 h-72 rounded-xl"></div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<div id="drawer-root"></div>
+<div id="modal-root"></div>
+<div id="toast-root" class="pointer-events-none fixed inset-x-0 bottom-0 z-[90] flex flex-col items-center gap-2 p-4 sm:items-end"></div>
+
+<script>window.AACC_VIEWER = <?!= viewerJson ?>;</script>
+<?!= include('Core'); ?>
+<?!= include('VPresupuesto'); ?>
+<?!= include('VAprobaciones'); ?>
+<?!= include('VGestion'); ?>
+<?!= include('FGestion'); ?>
+<?!= include('TodoPanel'); ?>
+<?!= include('VAdmin'); ?>
+<?!= include('VAsistente'); ?>
+<script>boot();</script>
+</body>
+</html>

@@ -1,0 +1,1092 @@
+<script>
+/* =====================================================================
+   VPresupuesto · Resumen, líneas de presupuesto y detalle de línea
+   Vistas: 'budget.summary', 'budget.lines' · Global: openLine(id), openLineForm(defaults)
+   (ver dev/SPEC.md §1.1, §6, §8)
+   ===================================================================== */
+
+/* ---------- Constantes del módulo ---------- */
+// drafts[id]: sólo los campos cambiados en el detalle · base[id]: {form, line} valores de partida de esos campos
+// (form = lo que mostraba el formulario, line = valor en la planilla)
+const BUD = { timer: null, drafts: {}, base: {}, mq: null, ptr: false, afterPtr: null };
+const BUD_SHORT = { cc: 'CC', ec: 'EC', nat: 'NAT' };
+const BUD_CLASES = ['POA', 'Nuevo', 'Fuera de POA'];
+const BUD_ACCION = ['Pagar/OC ya', 'Definir OC'];
+const BUD_ESTADOS = [
+  { v: 'Ejecutado', tone: 'emerald', icon: 'circle-check', stroke: 'stroke-emerald-500' },
+  { v: 'En curso', tone: 'sky', icon: 'circle-dot', stroke: 'stroke-sky-500' },
+  { v: 'Por ejecutar', tone: 'indigo', icon: 'circle', stroke: 'stroke-indigo-500' },
+  { v: 'No se realizará', tone: 'zinc', icon: 'circle-x', stroke: 'stroke-zinc-400' },
+];
+const BUD_ALERTAS = {
+  'Pagar/OC ya': { tone: 'red', icon: 'triangle-alert', tip: 'OC marcada "No" con saldo pendiente: emitir la OC o regularizar el pago.' },
+  'Definir OC': { tone: 'amber', icon: 'circle-alert', tip: 'Falta indicar si la OC está emitida.' },
+  'OK con OC': { tone: 'sky', icon: 'check', tip: 'Saldo pendiente respaldado con OC.' },
+  'Pagado': { tone: 'emerald', icon: 'circle-check', tip: 'Sin saldo pendiente.' },
+  'Ejecutado': { tone: 'emerald', icon: 'circle-check', tip: 'Ejecutado fuera de POA.' },
+};
+const BUD_PROJ_TONE = { 'Activo': 'emerald', 'En pausa': 'amber', 'Cerrado': 'zinc' };
+const BUD_MUTED = 'text-zinc-500 dark:text-zinc-400';
+const BUD_CHIP = 'inline-flex items-center gap-1 rounded-md bg-zinc-100 px-1.5 py-0.5 text-[11px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300';
+const BUD_CHIP_PRJ = 'inline-flex min-w-0 max-w-[12rem] items-center gap-1 rounded-md bg-indigo-50 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:bg-indigo-500/10 dark:text-indigo-300 dark:hover:bg-indigo-500/20';
+// Montos de KPI: tamaño ajustado por ancho para que "$530.123.456" nunca se corte (rangos sin solaparse)
+const BUD_KPI_GRID = 'stagger grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6 max-sm:[&_[data-countup]]:text-lg xl:max-2xl:[&_[data-countup]]:text-[17px] 2xl:[&_[data-countup]]:text-xl';
+const BUD_PAGE = 150;
+// Tabla con anchos fijos: la columna Proyecto absorbe el espacio libre; bajo el mínimo, se desplaza dentro del contenedor.
+const BUD_TABLE = 'w-full min-w-[52.5rem] xl:min-w-[57.5rem] 2xl:min-w-[70.75rem] table-fixed border-separate border-spacing-0 text-sm ' +
+  '[&>tbody>tr>td]:border-b [&>tbody>tr>td]:border-zinc-100 [&>tbody>tr>td]:bg-white [&>tbody>tr>td]:px-3 [&>tbody>tr>td]:py-2.5 [&>tbody>tr>td]:align-middle [&>tbody>tr>td]:transition-colors ' +
+  'dark:[&>tbody>tr>td]:border-zinc-800/70 dark:[&>tbody>tr>td]:bg-zinc-900 [&>tbody>tr:hover>td]:bg-zinc-50 dark:[&>tbody>tr:hover>td]:bg-[#202023] ' +
+  '[&>tbody>tr>td:first-child]:sticky [&>tbody>tr>td:first-child]:left-0 [&>tbody>tr>td:first-child]:z-[5] [&>tbody>tr>td:first-child]:border-r ' +
+  '[&>tbody>tr>td:last-child]:pl-0 [&>tbody>tr>td:last-child]:pr-2';
+const BUD_URGENT = 'shadow-[inset_3px_0_0_0_var(--color-red-500)]';
+const BUD_PG_CARD = 'w-full min-w-0 rounded-md bg-white py-0.5 pl-4 pr-1.5 text-sm tabular-nums text-zinc-900 ring-1 ring-inset ring-zinc-200 transition focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-zinc-900 dark:text-zinc-100 dark:ring-zinc-700 dark:focus:ring-indigo-400';
+const BUD_PG_INPUT = 'w-28 rounded-md bg-transparent py-1 pl-5 pr-2 text-right tabular-nums ring-1 ring-inset ring-transparent transition hover:ring-zinc-200 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:hover:ring-zinc-700 dark:focus:bg-zinc-800 dark:focus:ring-indigo-400';
+const BUD_FOOT = 'sticky bottom-0 border-t border-zinc-200 bg-zinc-50 px-3 py-2.5 text-sm font-semibold tabular-nums whitespace-nowrap text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-white';
+// Ojo "Ver correo de respaldo": discreto (gris) y en índigo al pasar el mouse
+const BUD_EYE = 'inline-grid shrink-0 place-items-center rounded-md text-zinc-400 transition hover:bg-indigo-50 hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-500 dark:hover:bg-indigo-500/10 dark:hover:text-indigo-400';
+
+/* ---------- Estado de la vista ---------- */
+function budUi() {
+  S.ui = S.ui || {};
+  const u = S.ui.budget = S.ui.budget || {};
+  const d = { area: 'all', q: '', oc: 'all', estado: 'all', resp: 'all', accion: false, sort: { key: '', dir: 'desc' }, lineTab: 'detalle', allActions: false, limit: 0, filtersOpen: false };
+  Object.keys(d).forEach(k => { if (u[k] === undefined || u[k] === null) u[k] = d[k]; });
+  return u;
+}
+function budYear(l) { return Number(l && l.year) || S.year; }
+function budSum(arr, k) { return arr.reduce((a, x) => a + (Number(x[k]) || 0), 0); }
+function budProjectOf(lineId) { const pid = IDX.lineProject && IDX.lineProject.get(lineId); return pid ? IDX.project.get(pid) || null : null; }
+function budCommentCount(id) { return ((IDX.commentsByRef && IDX.commentsByRef.get(id)) || []).length; }
+
+// Misma regla de negocio que presCalc_ (servidor) para mostrar cambios al instante.
+function budCalc(l) {
+  const pf = Number(l.pf) || 0, pg = Number(l.pg) || 0, oc = l.oc || '';
+  l.pend = Math.max(pf - pg, 0);
+  l.estado = pf === 0 ? 'No se realizará' : pg >= pf ? 'Ejecutado' : (oc === 'Si' || pg > 0) ? 'En curso' : 'Por ejecutar';
+  l.alerta = pf === 0 ? '—' : l.clas === 'Fuera de POA' ? 'Ejecutado' : oc === '' ? 'Definir OC' : (oc === 'No' && l.pend > 0) ? 'Pagar/OC ya' : l.pend === 0 ? 'Pagado' : 'OK con OC';
+  return l;
+}
+
+/* ---------- Filtros y orden ---------- */
+function budHay(l) {
+  const p = budProjectOf(l.id);
+  return normTxt([l.proj, l.nota, l.area, l.clas, l.estado, l.alerta, l.resp ? userName(l.resp) : '', p ? p.nombre : '', l.id].join(' '));
+}
+function budMatches(l, u) {
+  if (u.area !== 'all' && l.pilar !== u.area) return false;
+  if (u.oc === 'Si' && l.oc !== 'Si') return false;
+  if (u.oc === 'No' && l.oc !== 'No') return false;
+  if (u.oc === 'none' && l.oc) return false;
+  if (u.estado !== 'all' && l.estado !== u.estado) return false;
+  const r = String(l.resp || '').toLowerCase();
+  if (u.resp === '__none' && r) return false;
+  if (u.resp !== 'all' && u.resp !== '__none' && r !== u.resp) return false;
+  if (u.accion && BUD_ACCION.indexOf(l.alerta) < 0) return false;
+  if (u.q) {
+    const hay = budHay(l);
+    if (!normTxt(u.q).split(/\s+/).filter(Boolean).every(t => hay.indexOf(t) >= 0)) return false;
+  }
+  return true;
+}
+function budSorted(list, sort) {
+  if (!sort || !sort.key) return list;
+  const k = sort.key, dir = sort.dir === 'asc' ? 1 : -1;
+  return list.slice().sort((a, b) => k === 'proj'
+    ? dir * String(a.proj || '').localeCompare(String(b.proj || ''), 'es', { sensitivity: 'base' })
+    : dir * ((Number(a[k]) || 0) - (Number(b[k]) || 0)));
+}
+function budFiltered(u, all) { return budSorted((all || budgetLines(S.year)).filter(l => budMatches(l, u)), u.sort); }
+function budActiveFilters(u) {
+  return (u.area !== 'all' ? 1 : 0) + (u.oc !== 'all' ? 1 : 0) + (u.estado !== 'all' ? 1 : 0) + (u.resp !== 'all' ? 1 : 0) + (u.accion ? 1 : 0) + (u.q ? 1 : 0);
+}
+function budRerenderSoon() { clearTimeout(BUD.timer); BUD.timer = setTimeout(() => rerender(), 140); }
+
+// Si la tabla se vuelve a dibujar con el puntero presionado (p. ej. el "change" del Pagado al hacer clic en otro
+// control), el nodo del mousedown desaparece y el navegador descarta ese clic: se espera a soltar el puntero.
+const BUD_PTR_UP = ['pointerup', 'mouseup', 'pointercancel'];
+['pointerdown', 'mousedown'].forEach(t => document.addEventListener(t, () => { BUD.ptr = true; }, true));
+BUD_PTR_UP.forEach(t => document.addEventListener(t, () => { BUD.ptr = false; }, true));
+function budRerenderAfterPointer() {
+  if (!BUD.ptr) { budRerenderSafe(); return; }
+  if (BUD.afterPtr) return;
+  const h = () => { BUD_PTR_UP.forEach(t => document.removeEventListener(t, h, true)); BUD.afterPtr = null; setTimeout(budRerenderSafe, 0); };
+  BUD.afterPtr = h;
+  BUD_PTR_UP.forEach(t => document.addEventListener(t, h, true));
+}
+
+// v3.4: si el foco ya está en otro Pagado (p. ej. se pasó de una tarjeta a la siguiente), no se redibuja hasta que
+// salga de ese campo: así no se cierra el teclado del celular ni se pierde lo que se está escribiendo.
+function budRerenderSafe() {
+  const ae = typeof document !== 'undefined' ? document.activeElement : null;
+  if (ae && ae.matches && ae.matches('input[data-change="budget.pg"]')) {
+    ae.addEventListener('blur', () => setTimeout(budRerenderSafe, 0), { once: true });
+    return;
+  }
+  rerender();
+}
+
+/* ---------- Piezas de UI del módulo ---------- */
+function budPillarShort(key, area) {
+  const p = PIL(key);
+  if (!p) return '<span title="' + esc(area || 'Sin área') + '">' + badge(area ? String(area).slice(0, 3).toUpperCase() : '—', 'zinc') + '</span>';
+  return '<span title="' + esc(p.label) + '">' + badge(BUD_SHORT[p.key] || p.label, p.color, p.icon) + '</span>';
+}
+function budPillarLabel(l) { const p = PIL(l.pilar); return p ? p.label : (l.area || 'Sin área'); }
+// "POA" es lo normal: sólo se marca lo distinto (Nuevo / Fuera de POA)
+function budClasBadge(c) { return c && c !== 'POA' ? badge(c, c === 'Nuevo' ? 'violet' : 'zinc') : ''; }
+// Sólo las alertas que piden hacer algo; el resto ya se lee en Estado, OC y Pendiente
+function budNeedsAction(a) { return BUD_ACCION.indexOf(a) >= 0; }
+function budEstadoMeta(v) { return BUD_ESTADOS.find(e => e.v === v) || { v: v || '—', tone: 'zinc', icon: 'circle', stroke: 'stroke-zinc-400' }; }
+function budEstadoBadge(v) { if (!v) return ''; const m = budEstadoMeta(v); return badge(v, m.tone, m.icon); }
+function budEstadoDot(v) {
+  const m = budEstadoMeta(v);
+  return '<span class="inline-flex items-center gap-1 text-[11px] text-zinc-500 dark:text-zinc-400"><span class="size-1.5 shrink-0 rounded-full ' + tone(m.tone).dot + '"></span>' + esc(v || '—') + '</span>';
+}
+function budAlertaBadge(a) {
+  if (!a || a === '—') return '<span class="text-xs text-zinc-400 dark:text-zinc-500" title="Sin monto final: no aplica">—</span>';
+  const m = BUD_ALERTAS[a] || { tone: 'zinc', icon: 'info', tip: '' };
+  return '<span class="inline-flex" title="' + esc(m.tip) + '">' + badge(a, m.tone, m.icon) + '</span>';
+}
+function budMoney(v, cls) {
+  return v ? (cls ? '<span class="' + cls + '">' + esc(fmtMoney(v)) + '</span>' : esc(fmtMoney(v))) : '<span class="text-zinc-300 dark:text-zinc-600">—</span>';
+}
+function budIconBox(name, t, size) {
+  const sz = size === 'sm' ? 'size-8 rounded-lg' : 'size-10 rounded-xl';
+  return '<span class="grid ' + sz + ' shrink-0 place-items-center ' + tone(t).iconbox + '">' + icon(name, size === 'sm' ? 'size-4' : 'size-5') + '</span>';
+}
+function budCallout(t, ic, html, cls) {
+  return '<div class="' + (cls == null ? 'mt-4' : cls) + ' flex items-start gap-2 rounded-lg px-3 py-2.5 text-xs leading-relaxed ring-1 ring-inset ' + tone(t).soft + '">' + icon(ic, 'mt-px size-3.5 shrink-0') + '<span>' + html + '</span></div>';
+}
+function budLegend(t, label, value, opts) {
+  opts = opts || {};
+  return '<div class="flex items-center justify-between gap-3 text-sm"><dt class="flex min-w-0 items-center gap-2 text-zinc-600 dark:text-zinc-300">' +
+    '<span class="size-2 shrink-0 rounded-full ' + (t ? tone(t).dot : '') + '"></span><span class="truncate">' + esc(label) + '</span>' +
+    (opts.extra ? '<span class="shrink-0 text-xs text-zinc-400 dark:text-zinc-500">' + esc(opts.extra) + '</span>' : '') + '</dt>' +
+    '<dd class="shrink-0 tabular-nums ' + (opts.strong ? 'font-semibold text-zinc-900 dark:text-white' : 'text-zinc-700 dark:text-zinc-200') + '">' + esc(fmtMoney(value)) + '</dd></div>';
+}
+function budCardHead(title, ic, right) {
+  return '<div class="flex items-center justify-between gap-3"><div class="flex min-w-0 items-center gap-2">' + icon(ic, 'size-4 shrink-0 text-zinc-400 dark:text-zinc-500') +
+    '<h2 class="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">' + esc(title) + '</h2></div>' + (right || '') + '</div>';
+}
+function budOcToggle(l) {
+  if (l.clas === 'Fuera de POA' || !(Number(l.pf) > 0)) return '<span class="text-xs text-zinc-400 dark:text-zinc-500" title="No aplica (fuera de POA o sin monto final)">—</span>';
+  const b = (v, label) => {
+    const on = l.oc === v;
+    const onCls = v === 'Si' ? 'bg-emerald-600 text-white shadow-sm dark:bg-emerald-500 dark:text-white' : 'bg-amber-500 text-white shadow-sm dark:bg-amber-500 dark:text-zinc-950';
+    return '<button type="button" data-action="budget.oc" data-id="' + esc(l.id) + '" data-value="' + v + '" aria-pressed="' + on + '" title="' + (on ? 'Quitar marca de OC' : 'OC emitida: ' + label) + '" class="min-w-8 rounded-md px-2 py-0.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 ' +
+      (on ? onCls : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-white') + '">' + label + '</button>';
+  };
+  return '<div class="inline-flex shrink-0 rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800" role="group" aria-label="OC emitida">' + b('Si', 'Sí') + b('No', 'No') + '</div>';
+}
+function budRespPicker(l, size) {
+  const cur = String(l.resp || '').toLowerCase();
+  const opts = [{ value: '', label: 'Sin asignar' }].concat(S.users.map(u => ({ value: u.email, label: u.name })));
+  if (cur && !S.users.some(u => u.email === cur)) opts.push({ value: cur, label: cur });
+  return '<label class="relative inline-flex rounded-full focus-within:ring-2 focus-within:ring-indigo-500/60" title="' + esc('Responsable: ' + userName(cur) + ' (clic para cambiar)') + '">' + avatar(cur, size || 'sm') +
+    '<select data-change="budget.respQuick" data-id="' + esc(l.id) + '" aria-label="' + esc('Responsable de ' + (l.proj || 'la línea')) + '" class="absolute inset-0 size-full cursor-pointer opacity-0">' +
+    opts.map(o => '<option value="' + esc(o.value) + '"' + (o.value === cur ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('') + '</select></label>';
+}
+function budAreaSegmented(u, all, withCounts) {
+  return segmented({
+    value: u.area, action: 'budget.area',
+    options: [{ value: 'all', label: 'Todas', count: withCounts ? all.length : null }].concat(S.pillars.map(p => ({
+      value: p.key, label: p.label, icon: p.icon, count: withCounts ? all.filter(l => l.pilar === p.key).length : null,
+    }))),
+  });
+}
+function budSheetBtn(iconOnly) {
+  const url = safeUrl(S.config && S.config.sheetUrl);
+  if (!url) return '';
+  return iconOnly ? iconBtn({ icon: 'external-link', href: url, external: true, title: 'Abrir planilla' })
+    : btn({ label: 'Abrir planilla', icon: 'external-link', href: url, external: true, variant: 'ghost', title: 'Abrir la planilla en una pestaña nueva' });
+}
+function budEmptyYear(year) {
+  const missing = (S.years || []).indexOf(Number(year)) < 0;
+  const admin = budIsAdmin();
+  const actions = btn({ label: 'Agregar primera línea', icon: 'plus', variant: 'primary', action: 'budget.new' }) +
+    (admin && missing ? btn({ label: 'Crear pestaña en Ajustes', icon: 'settings', variant: 'secondary', action: 'budget.go', data: { to: '#/ajustes' } }) : '');
+  // Sólo se explica lo que evita un error: sin la pestaña no se pueden agregar líneas
+  return card(emptyState({
+    icon: 'file-spreadsheet', title: 'Sin líneas en ' + year,
+    text: missing ? 'Falta la pestaña «Cuadre ' + year + '» en la planilla.' : '',
+    actionHtml: '<div class="flex flex-wrap items-center justify-center gap-2">' + actions + '</div>',
+  }), 'anim-fade-in');
+}
+
+/* ---------- Totales ---------- */
+function budTotals(lines) {
+  const vig = lines.filter(l => Number(l.pf) > 0);
+  const con = vig.filter(l => l.oc === 'Si'), sin = vig.filter(l => l.oc !== 'Si');
+  const poa = lines.filter(l => l.clas === 'POA');
+  return {
+    n: lines.length, nVig: vig.length, nPOA: poa.length,
+    poPOA: budSum(poa, 'po'), pfPOA: budSum(poa, 'pf'),
+    pf: budSum(lines, 'pf'), pg: budSum(lines, 'pg'), pend: budSum(lines, 'pend'),
+    comp: budSum(con, 'pf'), nCon: con.length, nSin: sin.length, conPf: budSum(con, 'pf'), sinPf: budSum(sin, 'pf'),
+    pendCon: budSum(con, 'pend'), pendSin: budSum(sin, 'pend'),
+    alerts: lines.filter(l => l.alerta === 'Pagar/OC ya'), definir: lines.filter(l => l.alerta === 'Definir OC'),
+  };
+}
+
+/* =====================================================================
+   Vista: Resumen de presupuesto
+   ===================================================================== */
+function budRenderSummary() {
+  const u = budUi(), year = S.year, all = budgetLines(year);
+  // Sin subtítulo: la hora de sincronización ya está en la barra superior
+  const right = (all.length
+    ? btn({ label: 'Ver líneas', icon: 'table-2', variant: 'secondary', action: 'budget.go', data: { to: '#/presupuesto/lineas' } }) +
+      iconBtn({ icon: 'download', action: 'budget.export', data: { scope: 'summary' }, title: 'Exportar a Excel', variant: 'secondary' })
+    : '') + budSheetBtn(true);
+  const head = pageHeader({ title: 'Presupuesto ' + year, icon: 'wallet', tone: 'indigo', right: right }) + budSolPendingCard();
+  if (!all.length) return head + budEmptyYear(year);
+
+  const A = u.area === 'all' ? all : all.filter(l => l.pilar === u.area);
+  const T = budTotals(A);
+  return head + '<div class="mb-5">' + budAreaSegmented(u, all, false) + '</div>' + budKpis(T) +
+    '<div class="stagger mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">' +
+    budActionCard(A, u) + budExecCard(T) +
+    budCoverageCard(T) + budPendingCard(T) + budEstadoCard(A, T) +
+    budAreaCard(all, u) + budRespCard(A) +
+    '</div>';
+}
+
+function budKpis(T) {
+  const nA = T.alerts.length, alertPend = budSum(T.alerts, 'pend');
+  const libre = T.poPOA - T.pfPOA;
+  const sub = (txt, tip) => '<span title="' + esc(tip || txt) + '">' + esc(txt) + '</span>';
+  const subPOA = !T.nPOA ? sub('Sin líneas POA')
+    : libre > 0 ? sub(fmtCompact(libre) + ' liberado', fmtMoney(libre) + ' liberado: original POA menos el final proyectado de esas líneas')
+    : libre < 0 ? sub(fmtCompact(-libre) + ' sobre POA', fmtMoney(-libre) + ' por sobre lo planificado en las líneas POA')
+    : sub(plural(T.nPOA, 'línea POA', 'líneas POA'));
+  const subAlert = nA ? sub(fmtCompact(alertPend) + ' pendiente', fmtMoney(alertPend) + ' pendiente en líneas con OC "No"')
+    : T.definir.length ? sub(T.definir.length + ' por definir OC', plural(T.definir.length, 'línea', 'líneas') + ' con OC sin definir') : sub('Sin alertas');
+  return '<div class="' + BUD_KPI_GRID + '">' +
+    statCard({ label: 'Presup. original POA', value: T.poPOA, money: true, icon: 'piggy-bank', tone: 'zinc', sub: subPOA }) +
+    statCard({ label: 'Final proyectado', value: T.pf, money: true, icon: 'target', tone: 'indigo', sub: sub(plural(T.nVig, 'línea vigente', 'líneas vigentes')) }) +
+    statCard({ label: 'Comprometido con OC', value: T.comp, money: true, icon: 'file-check', tone: 'sky', sub: sub(pct(T.comp, T.pf) + '% del final') }) +
+    statCard({ label: 'Pagado a la fecha', value: T.pg, money: true, icon: 'banknote', tone: 'emerald', sub: sub(pct(T.pg, T.pf) + '% del final') }) +
+    statCard({ label: 'Pendiente', value: T.pend, money: true, icon: 'hourglass', tone: 'amber', sub: !T.pend ? sub('Sin saldo pendiente') : T.pendSin ? sub(fmtCompact(T.pendSin) + ' sin OC', fmtMoney(T.pendSin) + ' pendiente sin OC') : sub('Todo con OC', 'Todo el pendiente está respaldado con OC') }) +
+    statCard({ label: 'Alertas "Pagar/OC ya"', value: nA, icon: nA ? 'triangle-alert' : 'circle-check', tone: nA ? 'red' : 'emerald', valueCls: nA ? 'text-red-600 dark:text-red-400' : '', sub: subAlert }) +
+    '</div>';
+}
+
+function budActionCard(A, u) {
+  // Primero "Pagar/OC ya" (urgente), luego "Definir OC"; dentro de cada grupo, mayor pendiente primero
+  const list = A.filter(l => BUD_ACCION.indexOf(l.alerta) >= 0)
+    .sort((a, b) => (BUD_ACCION.indexOf(a.alerta) - BUD_ACCION.indexOf(b.alerta)) || (b.pend - a.pend) || (b.pf - a.pf));
+  // Nada que hacer → no se muestra la tarjeta (el KPI de alertas ya lo dice)
+  if (!list.length) return '';
+  const LIMIT = 5;
+  const shown = u.allActions ? list : list.slice(0, LIMIT);
+  const hasRed = list.some(l => l.alerta === 'Pagar/OC ya');
+  const right = btn({ label: 'Ver en tabla', icon: 'arrow-up-right', variant: 'ghost', size: 'sm', action: 'budget.gotoAccion' });
+  const title = '<div class="flex items-center gap-2">' + icon('list-checks', 'size-4 shrink-0 text-zinc-400 dark:text-zinc-500') +
+    '<h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Requieren acción</h2>' + badge(String(list.length), hasRed ? 'red' : 'amber') + '</div>';
+  const head = '<div class="px-5 pt-5"><div class="flex items-center justify-between gap-3">' + title + right + '</div></div>';
+  const body = '<div class="mt-3 divide-y divide-zinc-100 border-t border-zinc-100 dark:divide-zinc-800 dark:border-zinc-800">' + shown.map(l => {
+    const m = BUD_ALERTAS[l.alerta];
+    return '<button type="button" data-action="budget.open" data-id="' + esc(l.id) + '" class="group flex w-full items-center gap-3 px-5 py-3 text-left transition hover:bg-zinc-50 focus-visible:bg-zinc-50 focus-visible:outline-none dark:hover:bg-zinc-800/40 dark:focus-visible:bg-zinc-800/40">' +
+      budIconBox(m.icon, m.tone, 'sm') +
+      '<span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">' + esc(l.proj || 'Sin nombre') + '</span>' +
+      '<span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs ' + BUD_MUTED + '"><span class="shrink-0 font-medium ' + tone(m.tone).text + '">' + esc(l.alerta) + '</span>' +
+      (l.resp ? '<span aria-hidden="true">·</span><span class="truncate">' + esc(userName(l.resp)) + '</span>' : '') + '</span></span>' +
+      '<span class="shrink-0 text-sm font-semibold tabular-nums text-zinc-900 dark:text-white" title="Pendiente">' + esc(fmtMoney(l.pend)) + '</span>' +
+      icon('chevron-right', 'size-4 shrink-0 text-zinc-300 transition group-hover:translate-x-0.5 group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-400') + '</button>';
+  }).join('') + '</div>' +
+    (list.length > LIMIT ? '<button type="button" data-action="budget.toggleActions" aria-expanded="' + !!u.allActions + '" class="flex w-full items-center justify-center gap-1.5 border-t border-zinc-100 py-2.5 text-xs font-medium text-zinc-500 transition hover:bg-zinc-50 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500/60 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800/40 dark:hover:text-white">' +
+      (u.allActions ? 'Mostrar menos' + icon('chevron-up', 'size-3.5') : 'Ver ' + (list.length - LIMIT) + ' más' + icon('chevron-down', 'size-3.5')) + '</button>' : '');
+  return card(head + body, 'anim-slide-up overflow-hidden md:col-span-2');
+}
+
+function budExecCard(T) {
+  const p = pct(T.pg, T.pf), pc = pct(T.comp, T.pf);
+  return card('<div class="p-5">' + budCardHead('Ejecución', 'gauge') +
+    '<div class="mt-4 flex items-baseline gap-2"><span class="text-4xl font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-white">' + p + '%</span>' +
+    '<span class="text-sm ' + BUD_MUTED + '">pagado del monto final</span></div>' +
+    progress(p, 'emerald', 'mt-3') +
+    '<dl class="mt-4 space-y-2">' + budLegend('emerald', 'Pagado', T.pg) + budLegend('zinc', 'Pendiente', T.pend) + budLegend(null, 'Final proyectado', T.pf, { strong: true }) + '</dl>' +
+    '<div class="mt-5 border-t border-zinc-100 pt-4 dark:border-zinc-800"><div class="flex items-center justify-between gap-3 text-xs">' +
+    '<span class="font-medium text-zinc-700 dark:text-zinc-300">Comprometido con OC</span><span class="tabular-nums ' + BUD_MUTED + '">' + pc + '% · ' + esc(fmtCompact(T.comp)) + '</span></div>' +
+    progress(pc, 'sky', 'mt-2') + '</div></div>', 'anim-slide-up');
+}
+
+function budCoverageCard(T) {
+  const tot = T.conPf + T.sinPf;
+  const right = tot ? '<span class="shrink-0 text-xs tabular-nums ' + BUD_MUTED + '">' + pct(T.conPf, tot) + '% con OC</span>' : '';
+  return card('<div class="p-5">' + budCardHead('Cobertura de OC', 'file-check', right) +
+    '<div class="mt-4">' + stackBar([{ value: T.conPf, tone: 'emerald', label: 'Con OC' }, { value: T.sinPf, tone: 'amber', label: 'Sin OC' }]) + '</div>' +
+    '<dl class="mt-4 space-y-2">' + budLegend('emerald', 'Con OC', T.conPf, { extra: String(T.nCon) }) + budLegend('amber', 'Sin OC', T.sinPf, { extra: String(T.nSin) }) + '</dl>' +
+    '</div>', 'anim-slide-up');
+}
+
+function budPendingCard(T) {
+  return card('<div class="p-5">' + budCardHead('Pendiente de pago', 'hourglass') +
+    '<div class="mt-3 text-2xl font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-white">' + esc(fmtMoney(T.pend)) + '</div>' +
+    '<div class="mt-3">' + stackBar([{ value: T.pendCon, tone: 'emerald', label: 'Pendiente con OC' }, { value: T.pendSin, tone: 'red', label: 'Pendiente sin OC' }]) + '</div>' +
+    '<dl class="mt-4 space-y-2">' + budLegend('emerald', 'Con OC', T.pendCon) + budLegend('red', 'Sin OC', T.pendSin) + '</dl>' +
+    '</div>', 'anim-slide-up');
+}
+
+function budDonut(segs, total, label) {
+  const r = 52, C = 2 * Math.PI * r;
+  const live = total > 0 ? segs.filter(s => s.value > 0) : [];
+  const gap = live.length > 1 ? 1.6 : 0;
+  let off = 0;
+  const arcs = live.map(s => {
+    const len = s.value / total * C, dash = Math.max(len - gap, 0.6);
+    const out = '<circle cx="60" cy="60" r="' + r + '" fill="none" stroke-width="14" class="' + s.stroke + '" stroke-dasharray="' + dash.toFixed(2) + ' ' + (C - dash).toFixed(2) + '" stroke-dashoffset="' + (-off).toFixed(2) + '" transform="rotate(-90 60 60)"><title>' + esc(s.label + ': ' + fmtMoney(s.value)) + '</title></circle>';
+    off += len;
+    return out;
+  }).join('');
+  return '<div class="relative size-36 shrink-0"><svg viewBox="0 0 120 120" class="size-full" role="img" aria-label="' + esc(label) + '">' +
+    '<circle cx="60" cy="60" r="' + r + '" fill="none" stroke-width="14" class="stroke-zinc-100 dark:stroke-zinc-800"></circle>' + arcs + '</svg>' +
+    '<div class="pointer-events-none absolute inset-0 grid place-items-center text-center"><div><div class="text-sm font-semibold tabular-nums text-zinc-900 dark:text-white">' + esc(fmtCompact(total)) + '</div>' +
+    '<div class="text-[10px] font-medium uppercase tracking-wide ' + BUD_MUTED + '">monto final</div></div></div></div>';
+}
+
+function budEstadoCard(A, T) {
+  const tot = T.pf;
+  const segs = BUD_ESTADOS.map(e => {
+    const g = A.filter(l => l.estado === e.v);
+    return { v: e.v, label: e.v, tone: e.tone, stroke: e.stroke, n: g.length, value: budSum(g, 'pf') };
+  });
+  const aria = 'Distribución por estado: ' + segs.map(s => s.label + ' ' + pct(s.value, tot) + '%').join(', ');
+  const legend = segs.map(s => '<button type="button" data-action="budget.gotoEstado" data-value="' + esc(s.v) + '" title="' + esc('Ver líneas: ' + s.label) + '" class="flex w-full items-center justify-between gap-3 rounded-md px-1.5 py-1 text-left text-sm transition hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:bg-zinc-800/50">' +
+    '<span class="flex min-w-0 items-center gap-2"><span class="size-2 shrink-0 rounded-full ' + tone(s.tone).dot + '"></span><span class="truncate text-zinc-700 dark:text-zinc-300">' + esc(s.label) + '</span>' +
+    '<span class="shrink-0 text-xs text-zinc-400 dark:text-zinc-500">' + s.n + '</span></span>' +
+    '<span class="shrink-0 tabular-nums text-zinc-700 dark:text-zinc-200">' + esc(fmtCompact(s.value)) + ' <span class="text-xs text-zinc-400 dark:text-zinc-500">· ' + pct(s.value, tot) + '%</span></span></button>').join('');
+  return card('<div class="p-5">' + budCardHead('Distribución por estado', 'chart-pie') +
+    '<div class="mt-4 flex flex-col items-center gap-4 sm:flex-row md:flex-col">' + budDonut(segs, tot, tot ? aria : 'Sin monto final') +
+    '<div class="w-full min-w-0 space-y-0.5">' + legend + '</div></div></div>', 'anim-slide-up');
+}
+
+function budAreaCard(all, u) {
+  const rows = S.pillars.map(p => {
+    const g = all.filter(l => l.pilar === p.key);
+    const pf = budSum(g, 'pf'), pg = Math.min(budSum(g, 'pg'), pf), po = budSum(g.filter(l => l.clas === 'POA'), 'po');
+    const pp = pct(pg, pf), on = u.area === p.key, dim = u.area !== 'all' && !on;
+    return '<button type="button" data-action="budget.area" data-value="' + (on ? 'all' : p.key) + '" aria-pressed="' + on + '" title="' + esc(on ? 'Quitar filtro de área' : 'Filtrar por ' + p.label) + '" class="block w-full rounded-lg px-3 py-3 text-left transition hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:bg-zinc-800/50 ' +
+      (on ? 'bg-zinc-50 ring-1 ring-inset ring-zinc-200 dark:bg-zinc-800/50 dark:ring-zinc-700' : '') + (dim ? ' opacity-50' : '') + '">' +
+      '<div class="flex items-center justify-between gap-3"><span class="flex min-w-0 items-center gap-2">' + pillarBadge(p.key) + '<span class="text-xs ' + BUD_MUTED + '">' + esc(plural(g.length, 'línea', 'líneas')) + '</span></span>' +
+      '<span class="text-sm font-semibold tabular-nums text-zinc-900 dark:text-white">' + pp + '%</span></div>' +
+      progress(pp, p.color, 'mt-2.5') +
+      '<div class="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5 text-xs ' + BUD_MUTED + '"><span class="tabular-nums"><span class="font-medium text-zinc-700 dark:text-zinc-200">' + esc(fmtMoney(pg)) + '</span> pagado de ' + esc(fmtMoney(pf)) + '</span>' +
+      '<span class="tabular-nums">Original POA ' + esc(fmtMoney(po)) + '</span></div></button>';
+  }).join('');
+  const orphans = all.filter(l => !PIL(l.pilar));
+  const extra = orphans.length ? budCallout('amber', 'circle-alert', esc(plural(orphans.length, 'línea', 'líneas')) + ' sin área reconocida (columna Área).') : '';
+  return card('<div class="p-5">' + budCardHead('Avance por área', 'chart-column', u.area !== 'all' ? btn({ label: 'Ver todas', variant: 'ghost', size: 'sm', action: 'budget.area', data: { value: 'all' } }) : '') +
+    '<div class="-mx-3 mt-3 space-y-1">' + rows + '</div>' + extra + '</div>', 'anim-slide-up md:col-span-2');
+}
+
+function budRespCard(A) {
+  const groups = new Map();
+  A.forEach(l => { const k = String(l.resp || '').toLowerCase(); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(l); });
+  // Sólo quien tiene líneas en esta selección (equipo primero, luego otros correos y "Sin asignar")
+  const keys = S.users.map(x => x.email).filter(k => groups.has(k))
+    .concat(Array.from(groups.keys()).filter(k => k && !S.users.some(x => x.email === k)));
+  if (groups.has('')) keys.push('');
+  const rows = keys.map(k => {
+    const g = groups.get(k);
+    const pf = budSum(g, 'pf'), pg = Math.min(budSum(g, 'pg'), pf), pend = budSum(g, 'pend'), pp = pct(pg, pf);
+    return '<button type="button" data-action="budget.gotoResp" data-value="' + esc(k || '__none') + '" title="' + esc('Ver líneas de ' + (k ? userName(k) : 'Sin asignar')) + '" class="block w-full rounded-lg px-3 py-2.5 text-left transition hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:bg-zinc-800/50">' +
+      '<div class="flex items-center gap-3">' + avatar(k, 'md') +
+      '<div class="min-w-0 flex-1"><div class="flex items-center justify-between gap-3"><span class="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">' + esc(k ? userName(k) : 'Sin asignar') + '</span>' +
+      '<span class="shrink-0 text-sm font-semibold tabular-nums text-zinc-900 dark:text-white" title="' + esc(fmtMoney(pend) + ' pendiente') + '">' + esc(fmtCompact(pend)) + '</span></div>' +
+      '<div class="flex items-center justify-between gap-3 text-xs ' + BUD_MUTED + '"><span class="truncate" title="' + esc(fmtMoney(pg) + ' pagado de ' + fmtMoney(pf)) + '">' +
+      esc(plural(g.length, 'línea', 'líneas') + ' · ' + pp + '% pagado') + '</span><span class="shrink-0">pendiente</span></div>' +
+      progress(pp, k ? userColor(k) : 'zinc', 'mt-1.5') + '</div></div></button>';
+  }).join('');
+  return card('<div class="p-5">' + budCardHead('Por responsable', 'users') +
+    '<div class="-mx-3 mt-3 space-y-0.5">' + rows + '</div>' +
+    '</div>', 'anim-slide-up md:col-span-2 xl:col-span-1');
+}
+
+/* =====================================================================
+   Vista: Líneas de presupuesto
+   ===================================================================== */
+function budRenderLines() {
+  const u = budUi(), year = S.year, all = budgetLines(year);
+  const right = btn({ label: 'Nueva línea', icon: 'plus', variant: 'primary', action: 'budget.new' }) +
+    (all.length ? iconBtn({ icon: 'download', action: 'budget.export', data: { scope: 'lines' }, title: 'Exportar líneas filtradas a Excel', variant: 'secondary' }) : '') + budSheetBtn(true);
+  const head = pageHeader({
+    title: 'Líneas de presupuesto ' + year, icon: 'table-2', tone: 'indigo', right: right,
+    crumbs: [{ label: 'Presupuesto', href: '#/presupuesto' }],
+  });
+  if (!all.length) return head + budEmptyYear(year);
+  const list = budFiltered(u, all);
+  const results = !list.length
+    ? card(emptyState({ icon: 'funnel', title: 'Sin resultados', actionHtml: btn({ label: 'Limpiar filtros', icon: 'x', action: 'budget.clear' }) }), 'anim-fade-in')
+    : (budIsDesktop() ? budTable(list, u) : budCards(list, u)) + budMoreBtn(list, u);
+  return head + budToolbar(u, all, list) + results;
+}
+
+// Se dibuja sólo el diseño del ancho actual (tabla ≥ md, tarjetas en móvil) para no duplicar el DOM.
+function budIsDesktop() {
+  try { return !window.matchMedia || matchMedia('(min-width: 768px)').matches; } catch (e) { return true; }
+}
+function budShown(list, u) { return list.slice(0, Math.max(Number(u.limit) || 0, BUD_PAGE)); }
+function budMoreBtn(list, u) {
+  const n = list.length - budShown(list, u).length;
+  if (n <= 0) return '';
+  return '<div class="mt-3 flex justify-center">' + btn({ label: 'Mostrar ' + Math.min(n, BUD_PAGE) + ' más (quedan ' + n + ')', icon: 'chevron-down', variant: 'secondary', size: 'sm', action: 'budget.more' }) + '</div>';
+}
+
+function budFilterSelect(name, label, value, opts) {
+  const on = String(value) !== 'all';
+  return '<label class="relative block min-w-0"><span class="sr-only">' + esc(label) + '</span>' +
+    '<select data-change="' + name + '" aria-label="' + esc(label) + '" class="h-8 w-full min-w-0 appearance-none truncate rounded-lg border-0 py-0 pl-2.5 pr-8 text-xs font-medium shadow-sm ring-1 ring-inset transition focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:[color-scheme:dark] ' +
+    (on ? 'bg-indigo-50 text-indigo-700 ring-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-300 dark:ring-indigo-500/30' : 'bg-white text-zinc-700 ring-zinc-200 dark:bg-zinc-900 dark:text-zinc-200 dark:ring-zinc-800') + '">' +
+    opts.map(o => '<option value="' + esc(o.value) + '"' + (String(o.value) === String(value) ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('') + '</select>' +
+    '<span class="pointer-events-none absolute inset-y-0 right-2 grid place-items-center text-zinc-400">' + icon('chevron-down', 'size-3.5') + '</span></label>';
+}
+
+function budToolbar(u, all, list) {
+  const estOpts = [{ value: 'all', label: 'Todos los estados' }].concat(BUD_ESTADOS.map(e => ({ value: e.v, label: e.v + ' (' + all.filter(l => l.estado === e.v).length + ')' })));
+  const others = Array.from(new Set(all.map(l => String(l.resp || '').toLowerCase()).filter(e => e && !S.users.some(x => x.email === e))));
+  const respOpts = [{ value: 'all', label: 'Todos los responsables' }]
+    .concat(S.users.map(x => ({ value: x.email, label: x.name + ' (' + all.filter(l => String(l.resp || '').toLowerCase() === x.email).length + ')' })))
+    .concat(others.map(e => ({ value: e, label: e })))
+    .concat([{ value: '__none', label: 'Sin asignar (' + all.filter(l => !l.resp).length + ')' }]);
+  const nf = budActiveFilters(u);
+  const nSel = nf - (u.q ? 1 : 0);
+  const count = list.length === all.length ? plural(all.length, 'línea', 'líneas') : list.length + ' de ' + plural(all.length, 'línea', 'líneas');
+  const search = searchInput({ id: 'q-budget', input: 'budget.q', value: u.q, placeholder: 'Buscar proyecto, nota, responsable…', cls: 'min-w-0 flex-1 lg:w-80 lg:flex-none', attrs: 'aria-label="Buscar líneas"' });
+  const oc = '<div class="flex min-w-0 items-center gap-2"><span class="text-xs font-medium ' + BUD_MUTED + '">OC</span>' +
+    segmented({ value: u.oc, action: 'budget.ocFilter', options: [{ value: 'all', label: 'Todas' }, { value: 'Si', label: 'Con OC' }, { value: 'No', label: 'Sin OC' }, { value: 'none', label: 'Sin marcar' }] }) + '</div>';
+  const selects = '<div class="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">' +
+    '<div class="sm:w-44">' + budFilterSelect('budget.estado', 'Filtrar por estado', u.estado, estOpts) + '</div>' +
+    '<div class="sm:w-52">' + budFilterSelect('budget.resp', 'Filtrar por responsable', u.resp, respOpts) + '</div></div>';
+  // v3.4 (SPEC §18): "Requieren acción" ya no es un botón fijo; sólo aparece (para quitarlo) si se llegó desde el resumen
+  const accion = u.accion ? '<button type="button" data-action="budget.accionToggle" aria-pressed="true" title="Quitar este filtro" class="' + CX.chipOn + ' h-8">' +
+    icon('triangle-alert', 'size-3.5') + 'Requieren acción' + icon('x', 'size-3.5') + '</button>' : '';
+  const clear = nf ? btn({ label: 'Limpiar', icon: 'x', variant: 'ghost', size: 'sm', action: 'budget.clear', title: 'Quitar búsqueda y filtros' }) : '';
+  const countEl = '<span class="ml-auto text-xs tabular-nums ' + BUD_MUTED + '" aria-live="polite">' + esc(count) + '</span>';
+  if (budIsDesktop()) {
+    return '<div class="mb-4 space-y-3">' +
+      '<div class="flex flex-col gap-2 lg:flex-row lg:items-center">' + search + '<div class="min-w-0">' + budAreaSegmented(u, all, true) + '</div></div>' +
+      '<div class="flex flex-wrap items-center gap-2">' + oc + selects + accion + clear + countEl + '</div></div>';
+  }
+  // Móvil: sólo la búsqueda y el botón Filtros; el resto se despliega al pedirlo
+  const open = !!u.filtersOpen;
+  return '<div class="mb-3 space-y-2">' +
+    '<div class="flex items-center gap-2">' + search +
+    '<button type="button" data-action="budget.filters" aria-expanded="' + open + '" class="' + (nSel ? CX.chipOn : CX.chip) + ' h-9 shrink-0 rounded-lg">' +
+    icon('sliders-horizontal', 'size-4') + 'Filtros' + (nSel ? '<span class="tabular-nums">' + nSel + '</span>' : '') + '</button></div>' +
+    (open ? '<div class="space-y-3 rounded-xl border border-zinc-200/80 bg-white p-3 shadow-sm anim-fade-in dark:border-zinc-800 dark:bg-zinc-900">' +
+      '<div class="min-w-0">' + budAreaSegmented(u, all, true) + '</div>' + oc + selects + '</div>' : '') +
+    (nf ? '<div class="flex flex-wrap items-center gap-2">' + accion + clear + countEl + '</div>' : '') +
+    '</div>';
+}
+
+function budTh(label, o) {
+  o = o || {};
+  const s = budUi().sort || {};
+  const active = !!o.key && s.key === o.key;
+  const pos = o.first ? 'sticky left-0 top-0 z-20 border-r' : 'sticky top-0 z-10';
+  const cls = 'whitespace-nowrap py-2.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400 border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 ' +
+    (o.pad || 'px-3') + ' ' + (o.w || '') + ' ' + pos + ' ' + (o.cls || '');
+  const justify = o.right ? 'justify-end' : o.center ? 'justify-center' : 'justify-start';
+  const text = o.raw ? label : esc(label);
+  if (!o.key) return '<th scope="col" class="' + cls + '"' + (o.title ? ' title="' + esc(o.title) + '"' : '') + '><div class="flex ' + justify + '">' + text + '</div></th>';
+  const ic = active ? (s.dir === 'asc' ? 'chevron-up' : 'chevron-down') : 'chevrons-up-down';
+  return '<th scope="col" class="' + cls + '" aria-sort="' + (active ? (s.dir === 'asc' ? 'ascending' : 'descending') : 'none') + '"><div class="flex ' + justify + '">' +
+    '<button type="button" data-action="budget.sort" data-key="' + o.key + '" title="' + esc('Ordenar por ' + label) + '" class="group inline-flex items-center gap-1 rounded transition hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:text-white ' + (active ? 'text-zinc-900 dark:text-white' : '') + '">' +
+    (o.right ? icon(ic, 'size-3.5 ' + (active ? 'text-indigo-500 dark:text-indigo-400' : 'text-zinc-300 group-hover:text-zinc-500 dark:text-zinc-600')) + text : text + icon(ic, 'size-3.5 ' + (active ? 'text-indigo-500 dark:text-indigo-400' : 'text-zinc-300 group-hover:text-zinc-500 dark:text-zinc-600'))) +
+    '</button></div></th>';
+}
+
+function budTable(list, u) {
+  const T = { po: budSum(list, 'po'), pf: budSum(list, 'pf'), pg: budSum(list, 'pg'), pend: budSum(list, 'pend') };
+  // Área y Presup. original sólo en 2xl, Responsable desde xl; en anchos menores van dentro de la celda Proyecto.
+  const head = '<thead><tr>' +
+    budTh('Proyecto', { key: 'proj', first: true }) +
+    budTh('Área', { w: 'w-[4.5rem]', cls: 'hidden 2xl:table-cell' }) +
+    budTh('Resp.', { w: 'w-[3.75rem]', cls: 'hidden xl:table-cell', title: 'Responsable' }) +
+    budTh('Presup. original', { key: 'po', right: true, w: 'w-[7.5rem]', cls: 'hidden 2xl:table-cell' }) +
+    budTh('Final', { key: 'pf', right: true, w: 'w-[7.5rem]' }) +
+    budTh('Pagado', { key: 'pg', right: true, w: 'w-[8.75rem]' }) +
+    budTh('Pendiente', { key: 'pend', right: true, w: 'w-[7.5rem]' }) +
+    budTh('OC', { center: true, w: 'w-[5.75rem]', title: 'OC emitida' }) +
+    budTh('Estado', { w: 'w-32' }) +
+    budTh('<span class="sr-only">Abrir</span>', { raw: true, w: 'w-10', pad: 'px-0' }) + '</tr></thead>';
+  const f = (cls, inner) => '<td class="' + BUD_FOOT + ' ' + cls + '">' + (inner || '') + '</td>';
+  const foot = '<tfoot><tr>' +
+    f('left-0 z-20 border-r', 'Total · ' + esc(plural(list.length, 'línea', 'líneas'))) +
+    f('z-10 hidden 2xl:table-cell') + f('z-10 hidden xl:table-cell') +
+    f('z-10 hidden text-right 2xl:table-cell', esc(fmtMoney(T.po))) + f('z-10 text-right', esc(fmtMoney(T.pf))) +
+    f('z-10 pr-5 text-right', esc(fmtMoney(T.pg))) + f('z-10 text-right', esc(fmtMoney(T.pend))) +
+    f('z-10') + f('z-10') + f('z-10') + '</tr></tfoot>';
+  const mails = budMailMap();
+  return '<div class="anim-fade-in ' + CX.tableWrap + ' max-h-[calc(100dvh-17rem)]">' +
+    '<table class="' + BUD_TABLE + '">' + head + '<tbody>' + budShown(list, u).map(l => budRow(l, mails)).join('') + '</tbody>' + foot + '</table></div>';
+}
+
+function budRow(l, mails) {
+  const p = budProjectOf(l.id), nc = budCommentCount(l.id);
+  const meta = '<span class="2xl:hidden">' + budPillarShort(l.pilar, l.area) + '</span>' +
+    '<span class="inline-flex xl:hidden">' + budRespPicker(l, 'xs') + '</span>' +
+    (l.clas && l.clas !== 'POA' ? '<span class="' + BUD_CHIP + '" title="Clasificación">' + esc(l.clas) + '</span>' : '') +
+    (nc ? '<span class="' + BUD_CHIP + '" title="' + esc(plural(nc, 'comentario', 'comentarios')) + '">' + icon('message-square', 'size-3 shrink-0') + nc + '</span>' : '') +
+    (p ? '<button type="button" data-action="budget.openProject" data-id="' + esc(p.id) + '" class="' + BUD_CHIP_PRJ + '" title="' + esc('Proyecto de gestión: ' + p.nombre) + '">' + icon('folder-kanban', 'size-3 shrink-0') + '<span class="truncate">' + esc(p.nombre) + '</span></button>' : '');
+  return '<tr>' +
+    '<td' + (l.alerta === 'Pagar/OC ya' ? ' class="' + BUD_URGENT + '"' : '') + '><div class="min-w-0">' +
+    '<div class="flex min-w-0 items-center gap-1">' +
+    '<button type="button" data-action="budget.open" data-id="' + esc(l.id) + '" title="' + esc(l.proj) + '" class="min-w-0 truncate rounded text-left font-medium hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:text-indigo-400">' + esc(l.proj || 'Sin nombre') + '</button>' +
+    budEye(mails ? mails.get(l.id) : budMailOf(l.id), '', 'size-6') + '</div>' +
+    (l.nota ? '<p class="mt-0.5 truncate text-xs ' + BUD_MUTED + '" title="' + esc(l.nota) + '">' + esc(l.nota) + '</p>' : '') +
+    '<div class="mt-1.5 flex min-w-0 flex-wrap items-center gap-1">' + meta + '</div></div></td>' +
+    '<td class="hidden 2xl:table-cell">' + budPillarShort(l.pilar, l.area) + '</td>' +
+    '<td class="hidden xl:table-cell">' + budRespPicker(l) + '</td>' +
+    '<td class="hidden whitespace-nowrap text-right tabular-nums text-zinc-600 2xl:table-cell dark:text-zinc-300">' + budMoney(l.po) + '</td>' +
+    '<td class="whitespace-nowrap text-right tabular-nums">' + budMoney(l.pf) + '</td>' +
+    '<td class="text-right"><div class="relative inline-block"><span class="pointer-events-none absolute inset-y-0 left-2 grid place-items-center text-xs text-zinc-400">$</span>' +
+    '<input id="bud-pg-' + esc(l.id) + '" type="text" inputmode="numeric" autocomplete="off" data-money="1" data-change="budget.pg" data-id="' + esc(l.id) + '" value="' + (l.pg ? fmtNum(l.pg) : '0') + '" aria-label="' + esc('Pagado a la fecha: ' + (l.proj || '')) + '" title="Editar pagado · Enter guarda, Esc descarta" class="' + BUD_PG_INPUT + '"></div></td>' +
+    '<td class="whitespace-nowrap text-right tabular-nums">' + (l.pend ? '<span class="font-semibold">' + esc(fmtMoney(l.pend)) + '</span>' : '<span class="text-zinc-400 dark:text-zinc-500">$0</span>') + '</td>' +
+    '<td class="text-center">' + budOcToggle(l) + '</td>' +
+    '<td>' + (budNeedsAction(l.alerta) ? '<div class="mb-1">' + budAlertaBadge(l.alerta) + '</div>' : '') + budEstadoDot(l.estado) + '</td>' +
+    '<td class="text-right">' + iconBtn({ icon: 'panel-right-open', action: 'budget.open', data: { id: l.id }, title: 'Abrir detalle' }) + '</td>' +
+    '</tr>';
+}
+
+function budMini(label, v, strong) {
+  return '<div class="min-w-0"><dt class="text-[11px] ' + BUD_MUTED + '">' + esc(label) + '</dt><dd class="truncate text-sm tabular-nums ' + (strong ? 'font-semibold text-zinc-900 dark:text-white' : 'text-zinc-700 dark:text-zinc-200') + '" title="' + esc(fmtMoney(v)) + '">' + esc(fmtCompact(v)) + '</dd></div>';
+}
+
+// Pagado editable en la tarjeta (móvil, v3.4): se toca, se escribe y al salir del campo (o con Enter) se guarda al instante.
+function budPgCard(l) {
+  const id = 'bud-pgc-' + l.id;
+  return '<div class="min-w-0"><dt class="text-[11px] ' + BUD_MUTED + '"><label for="' + esc(id) + '">Pagado</label></dt>' +
+    '<dd class="relative"><span class="pointer-events-none absolute inset-y-0 left-1.5 grid place-items-center text-[11px] text-zinc-400">$</span>' +
+    '<input id="' + esc(id) + '" type="text" inputmode="numeric" enterkeyhint="done" autocomplete="off" data-money="1" data-change="budget.pg" data-id="' + esc(l.id) + '" value="' + (l.pg ? fmtNum(l.pg) : '0') + '" aria-label="' + esc('Pagado a la fecha: ' + (l.proj || '')) + '" class="' + BUD_PG_CARD + '"></dd></div>';
+}
+
+function budCards(list, u) {
+  const T = { pf: budSum(list, 'pf'), pg: budSum(list, 'pg'), pend: budSum(list, 'pend') };
+  const strip = '<dl class="grid grid-cols-3 gap-2 rounded-xl border border-zinc-200/80 bg-white px-4 py-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">' +
+    budMini('Total final', T.pf) + budMini('Pagado', T.pg) + budMini('Pendiente', T.pend, true) + '</dl>';
+  const mails = budMailMap();
+  return '<div class="space-y-2 anim-fade-in">' + strip + budShown(list, u).map(l => budCard(l, mails)).join('') + '</div>';
+}
+
+function budCard(l, mails) {
+  const p = budProjectOf(l.id), nc = budCommentCount(l.id);
+  return '<div class="' + CX.card + ' p-4' + (l.alerta === 'Pagar/OC ya' ? ' ' + BUD_URGENT : '') + '">' +
+    '<div class="flex items-start gap-2"><div class="min-w-0 flex-1">' +
+    '<button type="button" data-action="budget.open" data-id="' + esc(l.id) + '" class="block w-full rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60"><span class="line-clamp-2 text-sm font-semibold text-zinc-900 dark:text-white">' + esc(l.proj || 'Sin nombre') + '</span></button>' +
+    (l.nota ? '<p class="mt-0.5 line-clamp-1 text-xs ' + BUD_MUTED + '">' + esc(l.nota) + '</p>' : '') +
+    '<div class="mt-1.5 flex flex-wrap items-center gap-1.5">' + budPillarShort(l.pilar, l.area) + budClasBadge(l.clas) + budEstadoDot(l.estado) + '</div>' +
+    '</div>' + budEye(mails ? mails.get(l.id) : budMailOf(l.id), '', 'size-8') + iconBtn({ icon: 'chevron-right', action: 'budget.open', data: { id: l.id }, title: 'Abrir detalle' }) + '</div>' +
+    '<dl class="mt-3 grid grid-cols-[1fr_1.35fr_1fr] gap-2 rounded-lg bg-zinc-50 px-3 py-2 dark:bg-zinc-800/50">' + budMini('Final', l.pf) + budPgCard(l) + budMini('Pendiente', l.pend, true) + '</dl>' +
+    '<div class="mt-3 flex items-center gap-2">' + budRespPicker(l) + '<div class="min-w-0 flex-1 truncate">' + (budNeedsAction(l.alerta) ? budAlertaBadge(l.alerta) : '') + '</div>' + budOcToggle(l) + '</div>' +
+    (nc || p ? '<div class="mt-2.5 flex min-w-0 flex-wrap items-center gap-1">' +
+      (nc ? '<span class="' + BUD_CHIP + '">' + icon('message-square', 'size-3 shrink-0') + esc(plural(nc, 'comentario', 'comentarios')) + '</span>' : '') +
+      (p ? '<button type="button" data-action="budget.openProject" data-id="' + esc(p.id) + '" class="' + BUD_CHIP_PRJ + '">' + icon('folder-kanban', 'size-3 shrink-0') + '<span class="truncate">' + esc(p.nombre) + '</span></button>' : '') + '</div>' : '') +
+    '</div>';
+}
+
+function budMountLines(root) {
+  root.querySelectorAll('input[data-change="budget.pg"]').forEach(i => {
+    i.addEventListener('focus', () => { try { i.select(); } catch (e) {} });
+    i.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { i.value = i.defaultValue; i.blur(); }
+      else if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); i.blur(); }
+    });
+  });
+  // Cambiar de tabla a tarjetas (o al revés) al cruzar el ancho md
+  if (!BUD.mq && window.matchMedia) {
+    try {
+      BUD.mq = matchMedia('(min-width: 768px)');
+      const h = () => { if (S && S.route && S.route.name === 'budget.lines') rerender(); };
+      if (BUD.mq.addEventListener) BUD.mq.addEventListener('change', h); else if (BUD.mq.addListener) BUD.mq.addListener(h);
+    } catch (e) { BUD.mq = null; }
+  }
+}
+
+/* =====================================================================
+   Detalle de línea (drawer) · global openLine(id)
+   ===================================================================== */
+function openLine(id) {
+  if (!IDX.line || !IDX.line.get(id)) { toast('No se encontró la línea (puede haber sido eliminada).', 'error'); return; }
+  const u = budUi(), key = 'line:' + id;
+  if (currentDrawerKey() !== key) { u.lineTab = 'detalle'; budClearDraft(id); }
+  openDrawer({ key: key, width: 'lg', render: () => budLineDrawer(id), onMount: el => budLineMount(el, id) });
+}
+
+function budLineDrawer(id) {
+  const l = IDX.line.get(id);
+  if (!l) return null;
+  const u = budUi(), tab = u.lineTab || 'detalle';
+  const p = PIL(l.pilar);
+  const nc = budCommentCount(id);
+  const sheet = safeUrl(S.config && S.config.sheetUrl);
+  const iconHtml = '<span class="grid size-10 shrink-0 place-items-center rounded-xl ' + (p ? p.tone.iconbox : tone('zinc').iconbox) + '">' + icon(p ? p.icon : 'wallet', 'size-5') + '</span>';
+  const subtitle = [p ? pillarBadge(p.key) : badge(l.area || 'Sin área', 'zinc'), budClasBadge(l.clas), budEstadoBadge(l.estado),
+    (budNeedsAction(l.alerta) ? budAlertaBadge(l.alerta) : ''), '<span class="tabular-nums">Cuadre ' + esc(budYear(l)) + '</span>'].filter(Boolean).join('');
+  const headerRight = sheet ? iconBtn({ icon: 'external-link', href: sheet, external: true, title: 'Abrir en la planilla' + (l.row ? ' (fila ' + l.row + ')' : '') }) : '';
+  let content;
+  if (tab === 'comentarios') content = commentsPanel(id);
+  else if (tab === 'gestion') content = budLineGestion(l);
+  else content = budLineForm(l, BUD.drafts[id]);
+  const body = budLineStats(l) + budLineSols(l) +
+    '<div class="mt-6">' + tabs({ value: tab, action: 'budget.lineTab', options: [
+      { value: 'detalle', label: 'Detalle', icon: 'file-text' },
+      { value: 'comentarios', label: 'Comentarios', icon: 'message-square', count: nc || null },
+      { value: 'gestion', label: 'Gestión', icon: 'folder-kanban' },
+    ] }) + '</div><div class="mt-5 anim-fade-in" data-line-tab="' + esc(tab) + '">' + content + '</div>';
+  const footer = btn({ label: 'Eliminar', icon: 'trash', variant: 'danger-ghost', action: 'budget.delete', data: { id: id }, cls: 'mr-auto' }) +
+    (tab === 'detalle' ? btn({ label: 'Guardar cambios', icon: 'check', variant: 'primary', action: 'budget.saveLine', data: { id: id } }) : '');
+  return { title: l.proj || 'Sin nombre', subtitle: subtitle, iconHtml: iconHtml, headerRight: headerRight, body: body, footer: footer };
+}
+
+function budLineStats(l) {
+  const p = pct(l.pg, l.pf);
+  const stat = (label, v, cls) => '<div class="min-w-0 rounded-lg bg-zinc-50 px-3 py-2.5 ring-1 ring-inset ring-zinc-200/70 dark:bg-zinc-800/50 dark:ring-zinc-700/60">' +
+    '<div class="text-[11px] font-medium ' + BUD_MUTED + '">' + esc(label) + '</div>' +
+    '<div class="mt-0.5 truncate text-sm font-semibold tabular-nums sm:text-base ' + (cls || 'text-zinc-900 dark:text-white') + '" title="' + esc(fmtMoney(v)) + '">' +
+    '<span class="sm:hidden">' + esc(fmtCompact(v)) + '</span><span class="hidden sm:inline">' + esc(fmtMoney(v)) + '</span></div></div>';
+  return '<div class="grid grid-cols-3 gap-2">' + stat('Final proyectado', l.pf) +
+    stat('Pagado', l.pg, 'text-emerald-700 dark:text-emerald-400') +
+    stat('Pendiente', l.pend, l.pend ? 'text-amber-700 dark:text-amber-400' : '') + '</div>' +
+    '<div class="mt-3">' + progress(p, 'emerald') +
+    '<div class="mt-1.5 flex flex-wrap justify-between gap-x-3 text-xs ' + BUD_MUTED + '"><span>' + p + '% pagado</span><span class="tabular-nums">Presup. original ' + esc(fmtMoney(l.po)) + '</span></div></div>';
+}
+
+/* ---------- Solicitudes de compra de Ariba (sólo administradores; ver VAprobaciones) ---------- */
+function budIsAdmin() { return typeof isAdminUI === 'function' ? isAdminUI() : !!(S && S.me && S.me.admin); }
+function budSols() { return budIsAdmin() && Array.isArray(S.solicitudes) ? S.solicitudes : []; }
+// Registrada en una línea: vinculada o que creó la línea
+function budSolLinked(x) { return !!(x && x.lineId) && (x.estado === 'Vinculada' || x.estado === 'Nueva línea'); }
+function budSolKey(x) { return String(x.fecha || x.recibido || ''); }
+// Solicitudes registradas en una línea, más nuevas primero
+function budSolsOfLine(lineId) {
+  return budSols().filter(x => budSolLinked(x) && x.lineId === lineId)
+    .sort((a, b) => { const ka = budSolKey(a), kb = budSolKey(b); return ka < kb ? 1 : ka > kb ? -1 : 0; });
+}
+/* ---------- Correo de respaldo: ojo que abre el hilo de Gmail (sólo administradores: el correo es de Gonzalo) ---------- */
+// lineId → URL (http/https) del hilo de la solicitud más reciente de esa línea; se arma una vez por render
+function budMailMap() {
+  const url = new Map(), key = new Map();
+  budSols().forEach(x => {
+    if (!budSolLinked(x)) return;
+    const u = safeUrl(x.hiloUrl);
+    if (!u) return;
+    const k = budSolKey(x);
+    if (!url.has(x.lineId) || k > key.get(x.lineId)) { url.set(x.lineId, u); key.set(x.lineId, k); }
+  });
+  return url;
+}
+function budMailOf(lineId) { return budMailMap().get(lineId) || ''; }
+// Link externo (nueva pestaña); sin URL segura no se dibuja nada
+function budEye(url, title, cls) {
+  const u = safeUrl(url);
+  if (!u) return '';
+  const t = title || 'Ver correo de respaldo';
+  return '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer" data-bud-mail="1" title="' + esc(t) + '" aria-label="' + esc(t) + '" class="' + BUD_EYE + ' ' + (cls || 'size-7') + '">' +
+    icon('eye', 'size-4 shrink-0') + '</a>';
+}
+function budSolDate(x) {
+  const v = x.fecha || x.recibido;
+  if (v && !isNaN(new Date(v).getTime())) return fmtDate(ymd(new Date(v)));
+  return String(x.fechaTexto || '').replace(/\s+a las.*$/i, '');
+}
+function budLineSols(l) {
+  const list = budSolsOfLine(l.id);
+  if (!list.length) return '';
+  const total = budSum(list, 'montoImputado');
+  // Cada solicitud: abre su tarjeta en la bandeja; el ojo abre su correo (si el hilo es un link seguro)
+  const anyEye = list.some(x => safeUrl(x.hiloUrl));
+  const rows = list.map(x => '<li class="flex items-center gap-1' + (anyEye ? ' pr-2' : '') + '"><button type="button" data-action="budget.openSol" data-id="' + esc(x.id) + '" title="' + esc('Ver ' + (x.pr || 'solicitud') + ' en Solicitudes de compra') + '" class="group flex min-w-0 flex-1 items-center gap-3 py-2.5 pl-4 ' + (anyEye ? 'pr-2' : 'pr-4') + ' text-left transition hover:bg-zinc-50 focus-visible:bg-zinc-50 focus-visible:outline-none dark:hover:bg-zinc-800/40 dark:focus-visible:bg-zinc-800/40">' +
+    '<span class="min-w-0 flex-1"><span class="flex min-w-0 items-center gap-1.5"><span class="shrink-0 font-mono text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">' + esc(x.pr || '—') + '</span>' +
+    '<span class="truncate text-sm text-zinc-800 dark:text-zinc-200">' + esc(x.nombre || x.asunto || 'Solicitud de compra') + '</span></span>' +
+    '<span class="mt-0.5 block text-xs ' + BUD_MUTED + '">' + esc([budSolDate(x), x.estado === 'Nueva línea' ? 'creó esta línea' : ''].filter(Boolean).join(' · ')) + '</span></span>' +
+    '<span class="shrink-0 text-sm font-semibold tabular-nums text-zinc-900 dark:text-white">' + esc(fmtMoney(x.montoImputado)) + '</span>' +
+    icon('chevron-right', 'size-4 shrink-0 text-zinc-300 transition group-hover:translate-x-0.5 group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-400') + '</button>' +
+    (budEye(x.hiloUrl, 'Ver correo de respaldo' + (x.pr ? ' (' + x.pr + ')' : ''), 'size-8') || (anyEye ? '<span class="size-8 shrink-0" aria-hidden="true"></span>' : '')) + '</li>').join('');
+  return '<section class="mt-5 overflow-hidden rounded-xl border border-zinc-200/80 dark:border-zinc-800" aria-label="Solicitudes de compra">' +
+    '<div class="flex items-center justify-between gap-3 border-b border-zinc-100 bg-zinc-50/70 px-4 py-2.5 dark:border-zinc-800 dark:bg-zinc-800/30">' +
+    '<div class="flex min-w-0 items-center gap-2">' + icon('receipt', 'size-4 shrink-0 text-zinc-400 dark:text-zinc-500') +
+    '<h3 class="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">Solicitudes de compra</h3>' +
+    '<span class="shrink-0 text-xs tabular-nums ' + BUD_MUTED + '" title="Total imputado">' + esc(fmtMoney(total)) + '</span></div>' +
+    '<button type="button" data-action="budget.solInbox" class="shrink-0 rounded text-xs font-medium text-indigo-600 hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400 dark:hover:text-indigo-300">Ver bandeja</button></div>' +
+    '<ul class="divide-y divide-zinc-100 dark:divide-zinc-800">' + rows + '</ul></section>';
+}
+// Resumen: aviso discreto cuando hay solicitudes de Ariba por registrar
+function budSolPendingCard() {
+  const pend = budSols().filter(x => x.estado === 'Pendiente');
+  if (!pend.length) return '';
+  const sug = pend.reduce((a, x) => a + (Number(x.sugerido) || Number(x.montoClp) || 0), 0);
+  return '<a href="#/presupuesto/solicitudes" class="group mb-5 flex items-center gap-3 rounded-xl border border-indigo-200/70 bg-indigo-50/60 px-4 py-3 transition hover:border-indigo-300 hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 anim-fade-in dark:border-indigo-500/20 dark:bg-indigo-500/10 dark:hover:border-indigo-500/40 dark:hover:bg-indigo-500/15">' +
+    budIconBox('inbox', 'indigo', 'sm') +
+    '<span class="min-w-0 flex-1"><span class="block truncate text-sm font-semibold text-zinc-900 dark:text-white">Por registrar: ' + esc(plural(pend.length, 'solicitud', 'solicitudes')) + ' de compra</span>' +
+    '<span class="block truncate text-xs tabular-nums ' + BUD_MUTED + '">' + esc(fmtMoney(sug)) + ' sugerido</span></span>' +
+    '<span class="hidden shrink-0 items-center gap-1 text-xs font-medium text-indigo-600 sm:inline-flex dark:text-indigo-400">Registrar' + icon('arrow-right', 'size-3.5 transition group-hover:translate-x-0.5') + '</span>' +
+    icon('chevron-right', 'size-4 shrink-0 text-indigo-400 sm:hidden') + '</a>';
+}
+
+function budFormFields(v) {
+  const areaOpts = S.pillars.map(p => ({ value: p.key, label: p.label }));
+  const clasOpts = BUD_CLASES.map(c => ({ value: c, label: c }));
+  if (v.clas && BUD_CLASES.indexOf(v.clas) < 0) clasOpts.push({ value: v.clas, label: v.clas });
+  return field({ name: 'proj', label: 'Proyecto / asesoría', value: v.proj, required: true, placeholder: 'Ej: Asesoría huella de carbono', cls: 'sm:col-span-2', attrs: 'maxlength="250" autocomplete="off"' }) +
+    selectField({ name: 'area', label: 'Área', value: v.area || '', options: areaOpts, placeholder: v.area ? undefined : 'Elegir área…', required: true }) +
+    selectField({ name: 'clas', label: 'Clasificación', value: v.clas || 'POA', options: clasOpts }) +
+    userSelect({ name: 'resp', label: 'Responsable', value: v.resp || '' }) +
+    selectField({ name: 'oc', label: 'OC emitida', value: v.oc || '', options: [{ value: '', label: 'Sin marcar' }, { value: 'Si', label: 'Sí' }, { value: 'No', label: 'No' }] }) +
+    field({ name: 'po', label: 'Presupuesto original', type: 'money', value: v.po }) +
+    field({ name: 'pf', label: 'Monto final proyectado', type: 'money', value: v.pf }) +
+    field({ name: 'pg', label: 'Pagado a la fecha', type: 'money', value: v.pg }) +
+    '<div data-line-preview class="sm:self-end">' + budPreview(v) + '</div>' +
+    field({ name: 'nota', label: 'Nota', type: 'textarea', value: v.nota, rows: 3, cls: 'sm:col-span-2', placeholder: 'N° de OC, contexto, desviaciones…' });
+}
+
+function budPreview(v) {
+  const c = budCalc({ pf: Number(v.pf) || 0, pg: Number(v.pg) || 0, oc: v.oc || '', clas: v.clas || '' });
+  return '<div class="rounded-lg border border-dashed border-zinc-300 px-3 py-2 dark:border-zinc-700" aria-live="polite">' +
+    '<div class="text-[11px] font-medium ' + BUD_MUTED + '">Pendiente</div>' +
+    '<div class="mt-1 flex flex-wrap items-center gap-1.5"><span class="mr-1 text-sm font-semibold tabular-nums text-zinc-900 dark:text-white">' + esc(fmtMoney(c.pend)) + '</span>' +
+    budEstadoBadge(c.estado) + budAlertaBadge(c.alerta) + '</div></div>';
+}
+
+// El draft sólo trae los campos cambiados: el resto muestra el valor actual de la planilla.
+function budLineForm(l, draft) {
+  const v = Object.assign({ proj: l.proj, area: l.pilar, clas: l.clas, resp: l.resp, po: l.po, pf: l.pf, pg: l.pg, oc: l.oc, nota: l.nota }, draft || {});
+  return '<div data-line-form="' + esc(l.id) + '" class="grid grid-cols-1 gap-4 sm:grid-cols-2">' + budFormFields(v) + '</div>' +
+    (draft ? '<p class="mt-4 flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-400">' + icon('pencil', 'size-3.5 shrink-0') + 'Tienes cambios sin guardar.</p>' : '');
+}
+
+function budLineMount(el, id) {
+  const form = el && el.querySelector('[data-line-form]');
+  const l = IDX.line.get(id);
+  if (!form || !l) return;
+  // Base = lo que muestra ahora el formulario y la planilla; los campos ya editados conservan su base original.
+  const now = { form: budPayload(readForm(form)), line: budSnap(l) };
+  const draft = BUD.drafts[id], prev = BUD.base[id];
+  if (draft && prev) Object.keys(draft).forEach(k => { now.form[k] = prev.form[k]; now.line[k] = prev.line[k]; });
+  BUD.base[id] = now;
+  const upd = () => {
+    const v = readForm(form);
+    const changed = budDiff(budPayload(v), BUD.base[id] ? BUD.base[id].form : now.form);
+    if (Object.keys(changed).length) BUD.drafts[id] = changed; else delete BUD.drafts[id];
+    const pv = form.querySelector('[data-line-preview]');
+    if (pv) { pv.innerHTML = budPreview(v); refreshIcons(pv); }
+  };
+  form.addEventListener('input', upd);
+  form.addEventListener('change', upd);
+  // Enter en un campo (o ⌘/Ctrl+Enter en la nota) guarda
+  form.addEventListener('keydown', e => {
+    const t = e.target;
+    if (e.key !== 'Enter' || e.isComposing) return;
+    if (t.tagName === 'INPUT' || (t.tagName === 'TEXTAREA' && (e.metaKey || e.ctrlKey))) {
+      e.preventDefault();
+      const b = el.querySelector('[data-action="budget.saveLine"]');
+      if (b && !b.disabled) b.click();
+    }
+  });
+}
+
+function budPayload(v) {
+  return {
+    proj: String(v.proj || '').trim(), area: v.area || '', clas: v.clas || '', resp: v.resp || '',
+    po: Number(v.po) || 0, pf: Number(v.pf) || 0, pg: Number(v.pg) || 0, oc: v.oc || '', nota: String(v.nota || '').trim(),
+  };
+}
+// Valores de la línea (planilla) en el formato de budPayload (área = clave de pilar).
+function budSnap(l) { return budPayload({ proj: l.proj, area: l.pilar, clas: l.clas, resp: l.resp, po: l.po, pf: l.pf, pg: l.pg, oc: l.oc, nota: l.nota }); }
+// Campos de `full` distintos de `base`.
+function budDiff(full, base) { const out = {}; Object.keys(full).forEach(k => { if (full[k] !== base[k]) out[k] = full[k]; }); return out; }
+function budClearDraft(id) { delete BUD.drafts[id]; delete BUD.base[id]; }
+function budValidate(v, root) {
+  const bad = !String(v.proj || '').trim() ? ['proj', 'Escribe el nombre del proyecto o asesoría.'] : !v.area ? ['area', 'Elige el área de la línea.'] : null;
+  if (!bad) return true;
+  toast(bad[1], 'error');
+  const f = root && root.querySelector('[name="' + bad[0] + '"]');
+  if (f) f.focus();
+  return false;
+}
+
+/* ---------- Pestaña Gestión del detalle ---------- */
+// Siempre edita un proyecto existente. v3.4 (SPEC §18): sin control de versión (agilidad: el último cambio gana).
+function budProjectPayload(p, lineas) {
+  return {
+    tipo: 'Proyecto', id: p.id, pilar: p.pilar, nombre: p.nombre, detalle: p.detalle || '', resp: p.resp || '',
+    estado: p.estado || 'Activo', anio: p.anio || '', lineas: lineas, cascade: p.cascade || '',
+    evidencias: (p.evidencias || []).map(e => ({ t: String(e.t || ''), u: String(e.u || '') })),
+  };
+}
+
+function budLineGestion(l) {
+  const p = budProjectOf(l.id);
+  if (p) return budLinkedProject(l, p);
+  const pil = PIL(l.pilar);
+  if (!pil) return budCallout('amber', 'circle-alert', 'Asigna un área (pestaña Detalle) para vincularla a un proyecto.');
+  // Misma regla que "Vincular líneas" del proyecto (SPEC §7): una línea con monto final $0 no se vincula.
+  if (!(Number(l.pf) > 0)) return budCallout('zinc', 'circle-x', 'Con monto final $0 no se vincula a proyectos.', '');
+  const canCreate = typeof openProjectForm === 'function';
+  const cands = (S.projects || []).filter(x => x.pilar === pil.key)
+    .sort((a, b) => ((a.estado === 'Cerrado') - (b.estado === 'Cerrado')) || String(a.nombre).localeCompare(String(b.nombre), 'es'));
+  const intro = '<div class="flex items-start gap-3">' + budIconBox('link-2', 'zinc', 'sm') +
+    '<p class="min-w-0 pt-1.5 text-sm font-semibold text-zinc-900 dark:text-white">Sin proyecto de gestión</p></div>';
+  const createBtn = size => canCreate ? btn({ label: 'Crear proyecto', icon: 'plus', variant: 'secondary', size: size, action: 'budget.newProject', data: { pilar: pil.key, line: l.id } })
+    : btn({ label: 'Ir a ' + pil.label, icon: 'arrow-up-right', variant: 'secondary', size: size, action: 'budget.go', data: { to: '#/gestion/' + pil.key } });
+  if (!cands.length) {
+    return '<div class="rounded-xl border border-dashed border-zinc-300 p-5 dark:border-zinc-700">' + intro +
+      '<div class="mt-4">' + createBtn('md') + '</div></div>';
+  }
+  const opts = cands.map(x => ({
+    value: x.id, group: x.estado === 'Cerrado' ? 'Cerrados' : 'Activos y en pausa',
+    label: x.nombre + (x.anio ? ' · ' + x.anio : '') + ' · ' + plural((x.lineas || []).length, 'línea', 'líneas') + (x.estado === 'En pausa' ? ' (en pausa)' : ''),
+  }));
+  return '<div class="rounded-xl border border-dashed border-zinc-300 p-5 dark:border-zinc-700">' + intro +
+    '<div class="mt-5 flex flex-col gap-2 sm:flex-row sm:items-end">' +
+    selectField({ name: 'bud-link', label: 'Proyecto de ' + pil.label, options: opts, placeholder: 'Elegir proyecto…', cls: 'min-w-0 flex-1', attrs: 'data-link-select="1"' }) +
+    btn({ label: 'Vincular', icon: 'link', variant: 'primary', action: 'budget.linkProject', data: { id: l.id } }) + '</div>' +
+    '<div class="mt-4 border-t border-zinc-100 pt-4 dark:border-zinc-800">' + createBtn('sm') + '</div></div>';
+}
+
+function budLinkedProject(l, p) {
+  const st = projectStats(p), pil = PIL(p.pilar);
+  const canOpen = typeof openProject === 'function';
+  const mini = (label, v, cls) => '<div class="px-4 py-3 text-center"><div class="text-lg font-semibold tabular-nums ' + (cls || 'text-zinc-900 dark:text-white') + '">' + v + '</div><div class="text-[11px] ' + BUD_MUTED + '">' + esc(label) + '</div></div>';
+  const others = st.lines.filter(x => x.id !== l.id);
+  return '<div class="' + CX.card + ' overflow-hidden">' +
+    '<div class="flex items-start gap-3 p-4">' + budIconBox('folder-kanban', pil ? pil.color : 'indigo') +
+    '<div class="min-w-0 flex-1"><p class="text-[11px] font-medium uppercase tracking-wide ' + BUD_MUTED + '">Proyecto de gestión</p>' +
+    '<p class="mt-0.5 text-sm font-semibold text-zinc-900 dark:text-white">' + esc(p.nombre) + '</p>' +
+    (p.detalle ? '<p class="mt-1 line-clamp-2 text-xs ' + BUD_MUTED + '">' + esc(p.detalle) + '</p>' : '') +
+    // El pilar ya está en el encabezado de la línea; el estado sólo si no está activo
+    (p.resp || (p.estado && p.estado !== 'Activo') ? '<div class="mt-2 flex flex-wrap items-center gap-1.5">' + (p.estado && p.estado !== 'Activo' ? badge(p.estado, BUD_PROJ_TONE[p.estado] || 'zinc') : '') +
+      (p.resp ? '<span class="inline-flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-300">' + avatar(p.resp, 'xs') + esc(userName(p.resp)) + '</span>' : '') + '</div>' : '') + '</div></div>' +
+    '<div class="grid grid-cols-3 divide-x divide-zinc-100 border-t border-zinc-100 dark:divide-zinc-800 dark:border-zinc-800">' +
+    mini('Tareas pendientes', st.pending) + mini('Realizadas', st.done, 'text-emerald-700 dark:text-emerald-400') + mini('Vencidas', st.overdue, st.overdue ? 'text-red-600 dark:text-red-400' : '') + '</div>' +
+    (st.nextTask ? '<div class="flex items-center gap-2 border-t border-zinc-100 px-4 py-3 text-sm dark:border-zinc-800"><span class="shrink-0 text-xs ' + BUD_MUTED + '">Próxima tarea</span>' +
+      '<span class="min-w-0 flex-1 truncate text-zinc-800 dark:text-zinc-200">' + esc(st.nextTask.nombre) + '</span>' + dueBadge(st.nextTask) + '</div>' : '') +
+    '<div class="border-t border-zinc-100 px-4 py-3 dark:border-zinc-800"><div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs"><span class="' + BUD_MUTED + '">Presupuesto del proyecto · ' + esc(plural(st.lines.length, 'línea', 'líneas')) + '</span>' +
+    '<span class="tabular-nums text-zinc-700 dark:text-zinc-200">' + esc(fmtMoney(st.pg)) + ' de ' + esc(fmtMoney(st.pf)) + '</span></div>' +
+    progress(pct(st.pg, st.pf), pil ? pil.color : 'indigo', 'mt-2') +
+    (others.length ? '<p class="mt-2 line-clamp-2 text-xs ' + BUD_MUTED + '">También incluye: ' + esc(others.map(x => x.proj).join(' · ')) + '</p>' : '') + '</div>' +
+    '<div class="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-100 bg-zinc-50/80 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900/60">' +
+    btn({ label: 'Desvincular', icon: 'unlink', variant: 'ghost', size: 'sm', action: 'budget.unlinkProject', data: { id: l.id }, title: 'Quitar esta línea del proyecto' }) +
+    (canOpen ? btn({ label: 'Abrir proyecto', icon: 'arrow-up-right', variant: 'primary', size: 'sm', action: 'budget.openProject', data: { id: p.id } })
+      : btn({ label: 'Ver en Gestión', icon: 'arrow-up-right', variant: 'primary', size: 'sm', action: 'budget.go', data: { to: '#/gestion/' + p.pilar } })) +
+    '</div></div>';
+}
+
+/* ---------- Nueva línea (modal) · global openLineForm(defaults) ---------- */
+function openLineForm(defaults) {
+  defaults = defaults || {};
+  const u = budUi(), year = Number(defaults.year) || S.year;
+  const empty = !budgetLines(year).length;
+  const v = {
+    proj: defaults.proj || '', area: defaults.area || (u.area !== 'all' ? u.area : ''),
+    clas: defaults.clas || (empty ? 'POA' : 'Nuevo'), resp: defaults.resp != null ? defaults.resp : myEmail(),
+    po: 0, pf: 0, pg: 0, oc: '', nota: '',
+  };
+  const missing = (S.years || []).indexOf(year) < 0;
+  openModal({
+    title: 'Nueva línea de presupuesto', size: 'lg',
+    subtitle: esc('Cuadre ' + year),
+    iconHtml: budIconBox('plus', 'indigo'),
+    body: (missing ? '<div class="mb-4">' + budCallout('amber', 'triangle-alert', 'La pestaña "Cuadre ' + esc(year) + '" no existe en la planilla. Un administrador debe crearla en Ajustes antes de agregar líneas.', '') + '</div>' : '') +
+      '<div data-new-line class="grid grid-cols-1 gap-4 sm:grid-cols-2">' + budFormFields(v) + '</div>',
+    footer: btn({ label: 'Cancelar', variant: 'secondary', attrs: 'data-nl="0"' }) + btn({ label: 'Crear línea', icon: 'plus', variant: 'primary', attrs: 'data-nl="1"' }),
+    onMount: (el, close) => {
+      const form = el.querySelector('[data-new-line]');
+      const save = el.querySelector('[data-nl="1"]');
+      const upd = () => { const pv = form.querySelector('[data-line-preview]'); if (pv) { pv.innerHTML = budPreview(readForm(form)); refreshIcons(pv); } };
+      const submit = () => {
+        if (save.disabled) return;
+        const data = readForm(form);
+        if (!budValidate(data, form)) return;
+        save.disabled = true;
+        mutate('budgetSave', [year, null, budPayload(data)], { success: 'Línea creada en Cuadre ' + year }).then(b => {
+          if (!b) { save.disabled = false; return; }
+          close();
+          if (b.lastId && IDX.line.get(b.lastId)) openLine(b.lastId);
+        });
+      };
+      form.addEventListener('input', upd);
+      form.addEventListener('change', upd);
+      form.addEventListener('keydown', e => {
+        const t = e.target;
+        if (e.key !== 'Enter' || e.isComposing) return;
+        if ((t.tagName === 'INPUT') || (t.tagName === 'TEXTAREA' && (e.metaKey || e.ctrlKey))) { e.preventDefault(); submit(); }
+      });
+      save.addEventListener('click', submit);
+      el.querySelector('[data-nl="0"]').addEventListener('click', () => close());
+    },
+  });
+}
+
+/* ---------- Guardado al instante ---------- */
+// Aplica un cambio (formato budPayload) a la línea local y recalcula Pendiente / Estado / Alerta como el servidor.
+function budApply(l, patch) {
+  Object.keys(patch).forEach(k => {
+    if (k === 'area') { l.pilar = patch.area; const P = PIL(patch.area); if (P && P.area) l.area = P.area; } else l[k] = patch[k];
+  });
+  return budCalc(l);
+}
+// Cambio rápido (Pagado, OC, responsable). afterPointer: llegó por un "change" al salir del campo (el clic que lo
+// causó aún no termina). v3.4 (SPEC §18): la tabla ya muestra el cambio y el servidor responde liviano (sin bundle);
+// sin toast de éxito ni barra. Si falla, Core avisa y recarga los datos reales.
+function budQuick(l, patch, afterPointer) {
+  const p = optimistic(() => { const x = IDX.line.get(l.id); if (x) budApply(x, patch); }, 'budgetSave', [budYear(l), l.id, patch, null, { light: true }],
+    { key: 'line:' + l.id + ':' + Object.keys(patch).sort().join(','), rerender: false, applyResult: false, reapply: true });
+  if (afterPointer) budRerenderAfterPointer(); else rerender();
+  if (currentDrawerKey() === 'line:' + l.id) refreshDrawer();
+  return p;
+}
+
+/* ---------- Excel ---------- */
+function budExport(scope) {
+  const u = budUi(), all = budgetLines(S.year);
+  const list = scope === 'summary' ? (u.area === 'all' ? all : all.filter(l => l.pilar === u.area)) : budFiltered(u, all);
+  if (!list.length) { toast('No hay líneas para exportar.', 'info'); return; }
+  const rows = list.map(l => {
+    const p = budProjectOf(l.id);
+    return {
+      'Año': budYear(l), 'Área': budPillarLabel(l), 'Proyecto': l.proj, 'Clasificación': l.clas,
+      'Responsable': l.resp ? userName(l.resp) : '', 'Correo responsable': l.resp || '',
+      'Presupuesto original': Number(l.po) || 0, 'Monto final proyectado': Number(l.pf) || 0, 'Pagado a la fecha': Number(l.pg) || 0, 'Pendiente': Number(l.pend) || 0,
+      'OC emitida': l.oc || '', 'Estado': l.estado, 'Alerta': l.alerta, 'Proyecto de gestión': p ? p.nombre : '',
+      'Comentarios': budCommentCount(l.id), 'Nota': l.nota || '', 'ID': l.id,
+    };
+  });
+  const suffix = u.area !== 'all' && BUD_SHORT[u.area] ? '_' + BUD_SHORT[u.area] : '';
+  downloadXlsx(rows, 'Cuadre ' + S.year, 'Cuadre_' + S.year + suffix + '_' + todayStr() + '.xlsx', [6, 18, 44, 13, 12, 24, 18, 20, 17, 14, 10, 15, 13, 32, 11, 48, 12]);
+  if (window.XLSX) toast(plural(rows.length, 'línea exportada', 'líneas exportadas') + ' a Excel', 'success');
+}
+
+/* =====================================================================
+   Registro de vistas y acciones
+   ===================================================================== */
+registerView('budget.summary', { title: () => 'Presupuesto ' + (S ? S.year : ''), render: budRenderSummary });
+registerView('budget.lines', { title: () => 'Líneas ' + (S ? S.year : ''), render: budRenderLines, mount: budMountLines });
+
+// Filtros
+action('budget.area', d => { budUi().area = d.value || 'all'; rerender(); });
+action('budget.ocFilter', d => { budUi().oc = d.value || 'all'; rerender(); });
+action('budget.estado', (d, el) => { budUi().estado = el.value || 'all'; rerender(); });
+action('budget.resp', (d, el) => { budUi().resp = el.value || 'all'; rerender(); });
+action('budget.q', (d, el) => { budUi().q = el.value; budRerenderSoon(); });
+action('budget.accionToggle', () => { const u = budUi(); u.accion = !u.accion; rerender(); });
+action('budget.filters', () => { const u = budUi(); u.filtersOpen = !u.filtersOpen; rerender(); });
+action('budget.clear', () => {
+  const u = budUi();
+  Object.assign(u, { area: 'all', q: '', oc: 'all', estado: 'all', resp: 'all', accion: false });
+  rerender();
+  const q = document.getElementById('q-budget'); if (q) q.focus();
+});
+action('budget.sort', d => {
+  const u = budUi(), s = u.sort || {}, k = d.key, first = k === 'proj' ? 'asc' : 'desc';
+  if (s.key !== k) u.sort = { key: k, dir: first };
+  else if (s.dir === first) u.sort = { key: k, dir: first === 'asc' ? 'desc' : 'asc' };
+  else u.sort = { key: '', dir: 'desc' };
+  rerender();
+});
+action('budget.more', () => { const u = budUi(); u.limit = Math.max(Number(u.limit) || 0, BUD_PAGE) + BUD_PAGE; rerender(); });
+action('budget.toggleActions', () => { const u = budUi(); u.allActions = !u.allActions; rerender(); });
+
+// Navegación
+action('budget.go', d => { if (d.to) go(d.to); });
+action('budget.gotoAccion', () => { const u = budUi(); Object.assign(u, { accion: true, oc: 'all', estado: 'all', resp: 'all', q: '' }); go('#/presupuesto/lineas'); });
+action('budget.gotoResp', d => { const u = budUi(); Object.assign(u, { resp: d.value || 'all', accion: false, estado: 'all', oc: 'all', q: '' }); go('#/presupuesto/lineas'); });
+action('budget.gotoEstado', d => { const u = budUi(); Object.assign(u, { estado: d.value || 'all', accion: false, oc: 'all', resp: 'all', q: '' }); go('#/presupuesto/lineas'); });
+
+// Líneas
+action('budget.open', d => openLine(d.id));
+action('budget.new', () => openLineForm());
+action('budget.export', d => budExport(d.scope));
+action('budget.pg', (d, el) => {
+  const l = IDX.line.get(d.id); if (!l) return;
+  const v = parseMoney(el.value);
+  if (v === (Number(l.pg) || 0)) { el.value = v ? fmtNum(v) : '0'; return; }
+  if (Number(l.pf) > 0 && v > l.pf) toast('Ojo: el pagado supera el monto final proyectado.', 'info');
+  budQuick(l, { pg: v }, true);
+});
+action('budget.oc', d => {
+  const l = IDX.line.get(d.id); if (!l) return;
+  const v = l.oc === d.value ? '' : d.value;
+  budQuick(l, { oc: v });
+});
+action('budget.respQuick', (d, el) => {
+  const l = IDX.line.get(d.id); if (!l) return;
+  const v = String(el.value || '').toLowerCase();
+  if (v === String(l.resp || '').toLowerCase()) return;
+  budQuick(l, { resp: v });
+});
+
+// Detalle
+action('budget.lineTab', d => { budUi().lineTab = d.value || 'detalle'; refreshDrawer(); });
+action('budget.saveLine', (d, el) => {
+  const l = IDX.line.get(d.id); if (!l) return;
+  const form = document.querySelector('#drawer-root [data-line-form]');
+  if (!form) return;
+  const data = readForm(form);
+  if (!budValidate(data, form)) return;
+  // Sólo los campos que cambiaste: lo que otro cambió mientras tanto en los demás campos no se pisa.
+  // v3.4 (SPEC §18): se ve al instante y se guarda por detrás; el último cambio gana, campo por campo.
+  const base = BUD.base[l.id] || { form: budSnap(l), line: budSnap(l) };
+  const patch = budDiff(budPayload(data), base.form);
+  const keys = Object.keys(patch);
+  if (!keys.length) { budClearDraft(l.id); refreshDrawer(); toast('No hay cambios que guardar.', 'info'); return; }
+  budClearDraft(l.id);
+  // Cambiar el área puede desvincular la línea de su proyecto: ahí se traen los datos completos
+  const light = keys.indexOf('area') < 0;
+  optimistic(() => { const x = IDX.line.get(l.id); if (x) budApply(x, patch); }, 'budgetSave', [budYear(l), l.id, patch, null].concat(light ? [{ light: true }] : []),
+    { applyResult: !light, reapply: true });
+  toast('Línea guardada', 'success');
+});
+action('budget.delete', d => {
+  const l = IDX.line.get(d.id); if (!l) return;
+  const p = budProjectOf(l.id), nc = budCommentCount(l.id), key = 'line:' + l.id;
+  confirmDialog({
+    title: '¿Eliminar esta línea?', confirmLabel: 'Eliminar línea', danger: true,
+    message: 'Se eliminará "' + (l.proj || 'Sin nombre') + '" de la pestaña Cuadre ' + budYear(l) + '.' +
+      (p ? ' Se quitará del proyecto "' + p.nombre + '".' : '') + (nc ? ' También se borrarán sus ' + plural(nc, 'comentario', 'comentarios') + '.' : '') +
+      ' Quedará registrado en el Historial.',
+  }).then(ok => {
+    if (!ok) return;
+    const year = String(budYear(l));
+    budClearDraft(l.id);
+    if (currentDrawerKey() === key) closeDrawer();
+    optimistic(() => { if (S.budget && S.budget[year]) S.budget[year] = S.budget[year].filter(x => x.id !== l.id); }, 'budgetDelete', [budYear(l), l.id], { reapply: true });
+    toast('Línea eliminada', 'success');
+  });
+});
+action('budget.linkProject', (d, el) => {
+  const l = IDX.line.get(d.id); if (!l) return;
+  if (!(Number(l.pf) > 0)) { toast('Una línea con monto final $0 no se puede vincular a un proyecto.', 'error'); return; }
+  const sel = document.querySelector('#drawer-root [data-link-select]');
+  const p = sel && sel.value ? IDX.project.get(sel.value) : null;
+  if (!p) { toast('Elige un proyecto para vincular.', 'error'); if (sel) sel.focus(); return; }
+  const cur = IDX.lineProject.get(l.id);
+  if (cur && cur !== p.id) { toast('La línea ya pertenece a otro proyecto. Desvincúlala primero.', 'error'); return; }
+  if (p.pilar !== l.pilar) { toast('El proyecto debe ser del mismo pilar que la línea.', 'error'); return; }
+  const lineas = (p.lineas || []).filter(x => x !== l.id).concat([l.id]);
+  optimistic(() => { const x = IDX.project.get(p.id); if (x) x.lineas = lineas.slice(); }, 'gSave', [budProjectPayload(p, lineas)], { reapply: true });
+  toast('Línea vinculada a "' + p.nombre + '"', 'success');
+});
+action('budget.unlinkProject', (d, el) => {
+  const l = IDX.line.get(d.id); if (!l) return;
+  const p = budProjectOf(l.id); if (!p) return;
+  const lineas = (p.lineas || []).filter(x => x !== l.id);
+  optimistic(() => { const x = IDX.project.get(p.id); if (x) x.lineas = lineas.slice(); }, 'gSave', [budProjectPayload(p, lineas)], { reapply: true });
+  toast('Línea desvinculada de "' + p.nombre + '"', 'success');
+});
+action('budget.openSol', d => {
+  if (typeof aprFocus === 'function') aprFocus(d.id);
+  else { closeDrawer(); go('#/presupuesto/solicitudes'); }
+});
+action('budget.solInbox', () => { closeDrawer(); go('#/presupuesto/solicitudes'); });
+action('budget.openProject', d => {
+  if (typeof openProject === 'function') openProject(d.id);
+  else { const p = IDX.project.get(d.id); go(p ? '#/gestion/' + p.pilar : '#/gestion'); }
+});
+action('budget.newProject', d => {
+  // lineas: sugerencia para precargar la línea en el proyecto nuevo (FGestion puede ignorarla)
+  if (typeof openProjectForm === 'function') openProjectForm(d.line ? { pilar: d.pilar, lineas: [d.line] } : { pilar: d.pilar });
+  else go('#/gestion/' + (d.pilar || ''));
+});
+</script>

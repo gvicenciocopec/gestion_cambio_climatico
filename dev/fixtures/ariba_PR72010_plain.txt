@@ -1,0 +1,78 @@
+Solicitud de compra
+Es necesaria una acción por su parte
+Este/esta solicitud de compra que PEDRO ANTONIO
+GONZÁLEZ NÚÑEZ ha enviado , requiere su aprobación.
+Motivo: Responsable CECO
+Haga clic en Aprobar o Denegar para aprobar o denegar Solicitud de
+compra,y escriba sus comentarios en el mensaje de correo electrónico
+que se abrirá. Para ver Solicitud de compra en la solución de Ariba,
+haga clic en Ver
+En representación de:
+PEDRO ANTONIO GONZÁLEZ
+NÚÑEZ
+Solicitud de compra:
+PR72010 - Consultoría economía
+circular para EDS y plantas
+Creado: martes, 15 septiembre,
+2026 a las 18:40, CLST
+Importe total: $52.104.330,90
+CLP
+Aprobar Denegar Ver
+Detalles de cabecera
+Max Approval Amount
+1.319,20 CLF
+Artículos en línea
+1 Descripción
+Diagnóstico y hoja de ruta de
+economía circular para la red EDS
+y plantas de lubricantes
+Asignación de cuentas
+K(Centro de coste)
+Proveedor
+CIRCULAR
+CONSULTORES
+SPA
+Entregar a
+Pedro
+González
+Ctd.
+1,00
+Unidad
+cada
+uno
+Precio
+1.319,20
+CLF
+Importe
+1.319,20
+CLF
+Cuenta contable Centro de costes Tipo Proporción
+0005602575(Asesorías
+Economía Circular)
+XUF70011(ECONOMIA
+CIRCULAR) Importe 1.234,50
+CLF
+0005602575(Asesorías
+Economía Circular)
+XUF70345(LUBRICANTES
+PLANTAS) Importe 62,30
+CLF
+0005606700(Materiales y equipos
+Pilotos Garage)
+XUF81084(NUEVAS
+ENERGIAS) Importe 22,40
+CLF
+Flujo de aprobación (A partir de miércoles, 16 septiembre, 2026 a las 09:12, CLST)
+Estado Necesario Motivo Responsable de
+aprobación Fecha Hora
+Listo para
+su
+aprobación
+Sí Responsable
+CECO
+GONZALO EDUARDO
+VICENCIO SANCHEZ
+Aprobar Denegar Ver
+Ahora puede aprobar solicitudes de compra desde un dispositivo móvil. Obtenga hoy mismo la
+aplicación SAP Ariba Procurement.
+Derechos de autor © 2005 - 2026 Ariba, Inc., Todos los derechos reservados.

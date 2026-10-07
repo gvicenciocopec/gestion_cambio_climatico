@@ -1,0 +1,7 @@
+{
+  "_nota": "Asuntos (getSubject) de cada fixture de Ariba. ariba_PR71524.txt es el PDF impreso del correo real; los *_plain.txt aproximan getPlainBody().",
+  "ariba_PR71524.txt": "Acción necesaria: Aprobar el/la Solicitud de compra que GONZALO ALEJANDRO CORTES UARAC ha enviado - PR71524 - Piloto Green Energy en Transcom ($13.473.363,17 CLP)",
+  "ariba_PR71524_plain.txt": "Acción necesaria: Aprobar el/la Solicitud de compra que GONZALO ALEJANDRO CORTES UARAC ha enviado - PR71524 - Piloto Green Energy en Transcom ($13.473.363,17 CLP)",
+  "ariba_PR71899_plain.txt": "Acción necesaria: Aprobar el/la Solicitud de compra que MARÍA JOSÉ PÉREZ SOTO ha enviado - PR71899 - Estudio huella hídrica en plantas de lubricantes ($4.512.880 CLP)",
+  "ariba_PR72010_plain.txt": "Recordatorio: Acción necesaria: Aprobar el/la Solicitud de compra que PEDRO ANTONIO GONZÁLEZ NÚÑEZ ha enviado - PR72010 - Consultoría economía circular para EDS y plantas ($52.104.330,90 CLP)"
+}

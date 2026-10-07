@@ -1,0 +1,644 @@
+<script>
+/* =====================================================================
+   VAprobaciones · Solicitudes de compra de Ariba (sólo administradores)
+   Vista: 'budget.approvals' (#/presupuesto/solicitudes) · Global: aprFocus(id)
+   Datos: S.solicitudes (SPEC §13.2). Se aprueban en el correo; aquí sólo se registran:
+   vincular a una línea, crear una línea nueva (Fuera de POA) o descartar.
+   ===================================================================== */
+
+/* ---------- Constantes del módulo ---------- */
+const APR = { t: null, flashT: null };
+const APR_PAGE = 30;
+const APR_MUTED = 'text-zinc-500 dark:text-zinc-400';
+const APR_ESTADOS = {
+  'Pendiente': { label: 'Por registrar', tone: 'indigo', icon: 'inbox' },
+  'Vinculada': { label: 'Vinculada', tone: 'emerald', icon: 'link-2' },
+  'Nueva línea': { label: 'Línea nueva', tone: 'sky', icon: 'list-plus' },
+  'Descartada': { label: 'Descartada', tone: 'zinc', icon: 'archive' },
+};
+const APR_FILTROS = [
+  { value: 'Pendiente', label: 'Pendientes' },
+  { value: 'Vinculada', label: 'Vinculadas' },
+  { value: 'Nueva línea', label: 'Nuevas líneas' },
+  { value: 'Descartada', label: 'Descartadas' },
+  { value: 'all', label: 'Todas' },
+];
+// Nombres que llegan en MAYÚSCULAS desde Ariba: artículos en minúscula y sufijos de empresa con su forma usual
+const APR_LOWER = { de: 1, del: 1, la: 1, las: 1, los: 1, el: 1, y: 1, e: 1, en: 1, por: 1, para: 1, a: 1, con: 1 };
+const APR_KEEP = { spa: 'SpA', 'sa': 'S.A.', 's.a.': 'S.A.', 's.a': 'S.A.', ltda: 'Ltda.', 'ltda.': 'Ltda.', eirl: 'EIRL', 'e.i.r.l.': 'E.I.R.L.' };
+// Área sugerida para una línea nueva (mismas pistas que el Asistente)
+const APR_PILAR_RE = [
+  ['cc', /clima|carbon|energ|huella|emision|electri|solar|diesel|combustib|descarbon/],
+  ['ec', /residu|recicl|circular|valoriz|zero waste|basura|envase/],
+  ['nat', /naturaleza|agua|hidric|humedal|biodiv|ecosistem|jardin|reforest/],
+];
+const APR_STOP = { piloto: 1, proyecto: 1, servicio: 1, servicios: 1, compra: 1, compras: 1, para: 1, asesoria: 1, asesorias: 1, desde: 1, entre: 1, sobre: 1 };
+const APR_FLASH = ['ring-2', 'ring-indigo-400/70', 'ring-offset-2', 'ring-offset-zinc-50', 'dark:ring-offset-zinc-950'];
+
+/* ---------- Estado de la vista ---------- */
+function aprUi() {
+  S.ui = S.ui || {};
+  const u = S.ui.aprob = S.ui.aprob || {};
+  const d = { filter: 'Pendiente', q: '', limit: APR_PAGE, st: null, stAt: 0, stLoading: false, stErr: '', scanning: false, flash: [], scrollTo: '' };
+  Object.keys(d).forEach(k => { if (!(k in u)) u[k] = d[k]; });
+  return u;
+}
+function aprAll() { return S && Array.isArray(S.solicitudes) ? S.solicitudes : []; }
+function aprGet(id) { return aprAll().find(s => s.id === id) || null; }
+function aprIsAdmin() { return typeof isAdminUI === 'function' ? isAdminUI() : !!(S && S.me && S.me.admin); }
+function aprRerenderIf() { if (S && S.route && S.route.name === 'budget.approvals') rerender(); }
+// Estado de la lectura automática: getAdminStatus().aprob (o S.config.aprob si el bundle lo trae)
+function aprStatus() { const u = aprUi(); return u.st || (S && S.config && S.config.aprob) || null; }
+function aprLoadStatus(force) {
+  const u = aprUi();
+  if (u.stLoading || !aprIsAdmin()) return;
+  if (!force && Date.now() - (u.stAt || 0) < 120000) return; // como máximo cada 2 min (también si falló: sin bucles)
+  u.stLoading = true; u.stAt = Date.now();
+  run('getAdminStatus').then(st => { u.st = (st && st.aprob) || u.st || {}; u.stErr = ''; })
+    .catch(e => { u.stErr = errMsg(e); })
+    .finally(() => { u.stLoading = false; aprRerenderIf(); });
+}
+
+/* ---------- Utilidades puras ---------- */
+function aprTitle(s) {
+  const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  if (!t || t !== t.toUpperCase()) return t; // sólo se corrige lo que viene todo en mayúsculas
+  return t.toLowerCase().split(' ').map((w, i) => {
+    if (APR_KEEP[w]) return APR_KEEP[w];
+    if (i > 0 && APR_LOWER[w]) return w;
+    return w.replace(/(^|[^a-záéíóúüñ])([a-záéíóúüñ])/g, (m, a, b) => a + b.toUpperCase());
+  }).join(' ');
+}
+function aprUf(n) { return (Number(n) || 0).toLocaleString('es-CL', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function aprSortKey(s) { return String(s.fecha || s.recibido || ''); }
+function aprWhen(s) {
+  if (s.fecha && !isNaN(new Date(s.fecha).getTime())) return fmtDateTime(s.fecha);
+  if (s.fechaTexto) return String(s.fechaTexto).replace(/,?\s*CLS?T\s*$/i, '').trim();
+  return s.recibido ? fmtDateTime(s.recibido) : '';
+}
+function aprSug(s) { return Number(s.sugerido) || Number(s.montoClp) || 0; }
+function aprCounts(list) {
+  const c = { all: list.length };
+  Object.keys(APR_ESTADOS).forEach(k => { c[k] = 0; });
+  list.forEach(s => { if (c[s.estado] != null) c[s.estado]++; });
+  return c;
+}
+function aprHay(s) {
+  const l = s.lineId && IDX.line ? IDX.line.get(s.lineId) : null;
+  return normTxt([s.pr, s.nombre, s.solicitante, s.proveedor, s.descripcion, s.comentario, s.asunto, s.nota, s.montoTexto,
+    (s.cecos || []).map(c => [c.codigo, c.nombre, c.cuenta, c.cuentaNombre].join(' ')).join(' '), l ? l.proj : ''].join(' '));
+}
+function aprMatch(s, toks) { if (!toks.length) return true; const h = aprHay(s); return toks.every(t => h.indexOf(t) >= 0); }
+// Más nuevas primero; filtro por estado ('all' = todas) y búsqueda sin tildes
+function aprVisible(list, filter, q) {
+  const toks = normTxt(q).split(/\s+/).filter(Boolean);
+  return list.filter(s => (filter === 'all' || s.estado === filter) && aprMatch(s, toks))
+    .sort((a, b) => aprSortKey(b) < aprSortKey(a) ? -1 : aprSortKey(b) > aprSortKey(a) ? 1 : 0);
+}
+function aprGuessPilar(s) {
+  const own = (s.cecos || []).filter(c => c.propio).map(c => [c.nombre, c.cuentaNombre].join(' ')).join(' ');
+  const texts = [own, [s.nombre, s.descripcion].join(' ')];
+  for (let i = 0; i < texts.length; i++) {
+    const n = normTxt(texts[i]);
+    if (!n) continue;
+    const hit = APR_PILAR_RE.find(p => p[1].test(n));
+    if (hit) return hit[0];
+  }
+  return '';
+}
+function aprDefaultYear(s, years, cur) {
+  const ys = (years || []).map(Number);
+  const cands = [Number(s.anio), Number(String(s.fecha || s.recibido || '').slice(0, 4)), Number(cur)];
+  return cands.find(y => y && ys.indexOf(y) >= 0) || ys[ys.length - 1] || Number(cur) || new Date().getFullYear();
+}
+// Lo ya imputado a una línea por otras solicitudes (para no contar dos veces)
+function aprImputed(lineId, exceptId) {
+  const xs = aprAll().filter(s => s.lineId === lineId && s.id !== exceptId && (s.estado === 'Vinculada' || s.estado === 'Nueva línea'));
+  return { n: xs.length, monto: xs.reduce((a, s) => a + (Number(s.montoImputado) || 0), 0) };
+}
+function aprTokens(t) {
+  const out = [];
+  normTxt(t).split(/[^a-z0-9]+/).forEach(w => { if (w.length >= 4 && !APR_STOP[w] && out.indexOf(w) < 0) out.push(w); });
+  return out;
+}
+// Líneas sugeridas: nota que menciona el PR (fuerte) o ≥ 2 palabras en común con el nombre / proveedor
+function aprSuggest(s, lines) {
+  const pr = normTxt(s.pr), toks = aprTokens([s.nombre, s.proveedor].join(' ')), pil = aprGuessPilar(s);
+  return (lines || []).map(l => {
+    const hay = normTxt([l.proj, l.nota].join(' '));
+    const mention = !!pr && hay.indexOf(pr) >= 0;
+    const words = toks.filter(w => hay.indexOf(w) >= 0).length;
+    return { l: l, mention: mention, score: (mention ? 10 : 0) + words + (pil && l.pilar === pil ? 0.5 : 0), words: words };
+  }).filter(x => x.mention || x.words >= 2).sort((a, b) => b.score - a.score).slice(0, 5);
+}
+function aprLinkPayload(v) {
+  return { year: Number(v.year) || 0, lineId: String(v.lineId || ''), monto: Math.max(0, Math.round(Number(v.monto) || 0)), marcarOc: !!v.marcarOc, nota: String(v.nota || '').trim() };
+}
+function aprNewLinePayload(v) {
+  return { year: Number(v.year) || 0, area: String(v.area || ''), proj: String(v.proj || '').trim(), monto: Math.max(0, Math.round(Number(v.monto) || 0)), nota: String(v.nota || '').trim() };
+}
+function aprScanMsg(r) {
+  r = r || {};
+  const added = Number(r.added) || 0, updated = Number(r.updated) || 0, found = Number(r.found) || 0;
+  if (added) return plural(added, 'solicitud nueva registrada', 'solicitudes nuevas registradas') + (updated ? ' · ' + plural(updated, 'actualizada', 'actualizadas') : '');
+  if (updated) return plural(updated, 'solicitud actualizada', 'solicitudes actualizadas');
+  return found ? 'Nada nuevo · ' + plural(found, 'correo revisado', 'correos revisados') : 'Nada nuevo';
+}
+
+/* ---------- Piezas de UI ---------- */
+function aprHeader(u) {
+  // Subtítulo = sólo el estado de la lectura de correos (cuándo se revisó o si está apagada)
+  const st = aprStatus();
+  const rel = st && st.lastScan ? fmtRel(st.lastScan) : '';
+  let when = '';
+  if (rel) when = 'Última revisión ' + (rel === 'ahora' ? 'recién' : rel);
+  else if (st && !st.triggerInstalled) when = 'Revisión automática apagada';
+  const gmailOn0 = !(S.config && S.config.features) || !!S.config.features.gmail;
+  if (!gmailOn0) when = 'Lectura de Gmail desactivada (modo seguro)';
+  const sub = when ? '<span' + (rel ? ' title="' + esc(fmtDateTime(st.lastScan)) + '"' : '') + '>' + esc(when) + '</span>' : '';
+  const gmailOn = gmailOn0;
+  const scan = !gmailOn ? '' : btn({
+    label: u.scanning ? 'Revisando…' : 'Revisar ahora', icon: u.scanning ? 'loader-circle' : 'refresh-cw', variant: 'ghost',
+    action: 'aprob.scan', disabled: u.scanning, title: 'Buscar ahora correos nuevos de Ariba', cls: u.scanning ? '[&_svg]:animate-spin' : '',
+  });
+  return pageHeader({ title: 'Solicitudes de compra', sub: sub, icon: 'inbox', tone: 'indigo', right: scan, crumbs: [{ label: 'Presupuesto', href: '#/presupuesto' }] });
+}
+
+function aprToolbar(u, counts) {
+  const opts = APR_FILTROS.map(f => ({ value: f.value, label: f.label, count: f.value === 'Pendiente' || counts[f.value] ? counts[f.value] || 0 : null }));
+  return '<div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">' +
+    '<div class="min-w-0">' + segmented({ value: u.filter, action: 'aprob.filter', options: opts }) + '</div>' +
+    searchInput({ id: 'q-aprob', input: 'aprob.q', value: u.q, placeholder: 'Buscar PR, proveedor, CeCo…', cls: 'w-full sm:w-64', attrs: 'aria-label="Buscar solicitudes"' }) + '</div>';
+}
+
+function aprCecos(s) {
+  const cs = Array.isArray(s.cecos) ? s.cecos : [];
+  if (!cs.length) return '';
+  const cols = 'grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 sm:grid-cols-[minmax(0,1fr)_6.5rem_8.5rem]';
+  const head = '<div class="hidden px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-400 sm:grid dark:text-zinc-500 ' + cols + '">' +
+    '<span>Centro de costo</span><span class="text-right">UF</span><span class="text-right">≈ CLP</span></div>';
+  const rows = cs.map(c => {
+    const own = !!c.propio;
+    const tip = [c.cuenta ? 'Cuenta ' + c.cuenta : '', aprTitle(c.cuentaNombre)].filter(Boolean).join(' · ');
+    return '<div class="' + cols + ' gap-y-0.5 px-3 py-2 ' + (own ? 'bg-emerald-50/70 dark:bg-emerald-500/[.07]' : '') + '"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' +
+      '<div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5"><span class="shrink-0 font-mono text-[11px] font-medium text-zinc-500 dark:text-zinc-400">' + esc(c.codigo || '—') + '</span>' +
+      '<span class="min-w-0 truncate text-sm text-zinc-800 dark:text-zinc-200">' + esc(aprTitle(c.nombre) || 'Sin nombre') + '</span>' + (own ? badge('Tu CeCo', 'emerald', 'circle-check') : '') + '</div>' +
+      '<div class="text-right text-sm tabular-nums text-zinc-700 dark:text-zinc-200">' + esc(aprUf(c.uf)) + ' <span class="text-[11px] text-zinc-400 dark:text-zinc-500">UF</span></div>' +
+      '<div class="col-span-2 text-right text-xs tabular-nums text-zinc-500 sm:col-span-1 sm:text-sm dark:text-zinc-400">≈ ' + esc(fmtMoney(c.clp)) + '</div></div>';
+  }).join('');
+  return '<div class="mt-4 overflow-hidden rounded-lg border border-zinc-200/80 dark:border-zinc-800">' + head +
+    '<div class="divide-y divide-zinc-100 dark:divide-zinc-800">' + rows + '</div></div>';
+}
+
+function aprSugerido(s) {
+  const own = (s.cecos || []).filter(c => c.propio);
+  const why = own.length ? (own.length === 1 ? 'tu CeCo ' : 'tus CeCos ') + own.map(c => c.codigo).join(', ') : 'el total (ningún CeCo es tuyo)';
+  return '<div class="mt-3 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm" title="' + esc('Según ' + why) + '">' + icon('hand-coins', 'size-4 shrink-0 text-indigo-500 dark:text-indigo-400') +
+    '<span class="text-zinc-600 dark:text-zinc-300">Sugerido para tu presupuesto:</span>' +
+    '<span class="font-semibold tabular-nums text-zinc-900 dark:text-white">' + esc(fmtMoney(aprSug(s))) + '</span></div>';
+}
+
+function aprLineRef(lineId) {
+  const l = lineId && IDX.line ? IDX.line.get(lineId) : null;
+  if (!l) return '<span class="italic opacity-80">' + (lineId ? 'una línea que ya no está en la planilla' : 'sin línea') + '</span>';
+  return '<button type="button" data-action="aprob.openLine" data-id="' + esc(l.id) + '" title="' + esc('Abrir línea: ' + (l.proj || '')) + '" class="min-w-0 max-w-full truncate rounded font-medium text-indigo-700 underline decoration-indigo-300 underline-offset-2 transition hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-300 dark:decoration-indigo-500/40 dark:hover:text-indigo-200">' + esc(l.proj || 'Sin nombre') + '</button>' +
+    '<span class="shrink-0 text-xs opacity-75">Cuadre ' + esc(l.year) + '</span>';
+}
+
+function aprOutcome(s) {
+  const by = [s.procesadoPor ? userName(s.procesadoPor) : '', s.procesado ? fmtRel(s.procesado) : ''].filter(Boolean).join(' · ');
+  const imp = s.montoImputado ? '<span class="shrink-0 font-semibold tabular-nums">' + esc(fmtMoney(s.montoImputado)) + '</span>' : '';
+  let t, ic, txt;
+  if (s.estado === 'Vinculada') { t = 'emerald'; ic = 'link-2'; txt = '<span class="shrink-0">Registrada en</span>' + aprLineRef(s.lineId) + imp; }
+  else if (s.estado === 'Nueva línea') { t = 'sky'; ic = 'list-plus'; txt = '<span class="shrink-0">Línea nueva</span>' + aprLineRef(s.lineId) + imp; }
+  else { t = 'zinc'; ic = 'archive'; txt = '<span class="shrink-0">Descartada</span>' + (s.nota ? '<span class="min-w-0 truncate italic">«' + esc(s.nota) + '»</span>' : ''); }
+  const note = s.estado !== 'Descartada' && s.nota ? '<p class="mt-1.5 break-words text-xs opacity-80">' + esc(s.nota) + '</p>' : '';
+  return '<div class="mt-4 rounded-lg px-3 py-2.5 ring-1 ring-inset ' + tone(t).soft + '">' +
+    '<div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm">' + icon(ic, 'size-4 shrink-0') + txt +
+    (by ? '<span class="ml-auto shrink-0 text-xs opacity-75" title="' + esc(s.procesado ? fmtDateTime(s.procesado) : '') + '">' + esc(by) + '</span>' : '') + '</div>' + note + '</div>';
+}
+
+function aprCard(s, u) {
+  const est = APR_ESTADOS[s.estado] || APR_ESTADOS['Pendiente'];
+  const pend = s.estado === 'Pendiente';
+  const url = safeUrl(s.hiloUrl);
+  const flash = (u.flash || []).indexOf(s.id) >= 0;
+  const meta = [
+    s.solicitante ? '<span class="inline-flex min-w-0 items-center gap-1">' + icon('user-round', 'size-3.5 shrink-0') + '<span class="truncate">' + esc(aprTitle(s.solicitante)) + '</span></span>' : '',
+    aprWhen(s) ? '<span class="inline-flex shrink-0 items-center gap-1"' + (s.recibido ? ' title="' + esc('Correo recibido ' + fmtDateTime(s.recibido)) + '"' : '') + '>' + icon('calendar', 'size-3.5 shrink-0') + esc(aprWhen(s)) + '</span>' : '',
+    s.proveedor ? '<span class="inline-flex min-w-0 items-center gap-1">' + icon('building-2', 'size-3.5 shrink-0') + '<span class="truncate">' + esc(aprTitle(s.proveedor)) + '</span></span>' : '',
+  ].filter(Boolean).join('');
+  const amount = s.montoClp ? fmtMoney(s.montoClp) : (s.montoTexto || '—');
+  const head = '<div class="flex items-start gap-3">' +
+    '<div class="min-w-0 flex-1">' +
+    (!pend || u.filter === 'all' ? '<div class="mb-1">' + badge(est.label, est.tone, est.icon) + '</div>' : '') +
+    '<h3 class="text-[15px] font-semibold leading-snug text-zinc-900 dark:text-white">' +
+    (s.pr ? '<span class="mr-1.5 font-mono text-[13px] text-indigo-600 dark:text-indigo-400">' + esc(s.pr) + '</span>' : '') + esc(s.nombre || s.asunto || 'Solicitud sin nombre') + '</h3>' +
+    (meta ? '<div class="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs ' + APR_MUTED + '">' + meta + '</div>' : '') + '</div>' +
+    '<div class="shrink-0 text-right"><div class="text-base font-semibold tracking-tight tabular-nums text-zinc-900 sm:text-lg dark:text-white"' + (s.montoTexto ? ' title="' + esc(s.montoTexto) + '"' : '') + '>' + esc(amount) + '</div>' +
+    (Number(s.totalUf) ? '<div class="text-[11px] tabular-nums ' + APR_MUTED + '">' + esc(aprUf(s.totalUf)) + ' UF</div>' : '') + '</div></div>';
+  const desc = s.descripcion ? '<p class="mt-3 line-clamp-2 text-sm leading-relaxed text-zinc-600 dark:text-zinc-300" title="' + esc(s.descripcion) + '">' + esc(s.descripcion) + '</p>' : '';
+  const cmt = s.comentario ? '<details class="group mt-2"><summary class="inline-flex cursor-pointer list-none items-center gap-1 rounded text-xs font-medium text-zinc-500 transition hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">' +
+    icon('chevron-right', 'size-3.5 shrink-0 transition group-open:rotate-90') + 'Comentario del solicitante</summary>' +
+    '<p class="mt-2 whitespace-pre-wrap break-words rounded-lg bg-zinc-50 px-3 py-2 text-sm leading-relaxed text-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-300">' + esc(s.comentario) + '</p></details>' : '';
+  const partial = s.lectura === 'parcial' ? '<div class="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900 ring-1 ring-inset ring-amber-600/15 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-400/20">' +
+    icon('triangle-alert', 'mt-px size-3.5 shrink-0 text-amber-600 dark:text-amber-400') + '<span>Revisa montos y CeCos: el correo no se pudo leer completo.</span></div>' : '';
+  const mail = url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 rounded text-xs font-medium text-zinc-500 transition hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:text-indigo-400">' +
+    icon('mail', 'size-3.5 shrink-0') + 'Abrir correo' + icon('arrow-up-right', 'size-3 shrink-0 opacity-70') + '</a>' : '';
+  const actions = pend
+    ? btn({ label: 'Descartar', icon: 'archive', variant: 'ghost', size: 'sm', action: 'aprob.discard', data: { id: s.id }, title: 'No corresponde registrarla en el presupuesto' }) +
+      btn({ label: 'Crear línea nueva', icon: 'plus', variant: 'secondary', size: 'sm', action: 'aprob.newLine', data: { id: s.id } }) +
+      btn({ label: 'Vincular a línea', icon: 'link-2', variant: 'primary', size: 'sm', action: 'aprob.link', data: { id: s.id } })
+    : btn({ label: 'Deshacer', icon: 'undo-2', variant: 'ghost', size: 'sm', action: 'aprob.reset', data: { id: s.id }, title: 'Volver a pendientes' });
+  // Ya registradas: más compactas (el detalle queda plegado para consulta)
+  const detail = pend ? desc + cmt + aprCecos(s)
+    : '<details class="group/det mt-3"><summary class="inline-flex cursor-pointer list-none items-center gap-1 rounded text-xs font-medium text-zinc-500 transition hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">' +
+      icon('chevron-right', 'size-3.5 shrink-0 transition group-open/det:rotate-90') + 'Detalle de la solicitud</summary>' + desc + cmt + aprCecos(s) + '</details>';
+  return '<article data-sol-id="' + esc(s.id) + '" class="' + CX.card + ' p-4 transition-shadow duration-700 sm:p-5 ' + (flash ? APR_FLASH.join(' ') + ' anim-scale-in' : '') + '"' + (flash ? ' data-sol-flash="1"' : '') + '>' +
+    head + (pend ? detail + aprSugerido(s) : aprOutcome(s) + detail) + partial +
+    '<div class="mt-4 flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">' + mail +
+    '<div class="ml-auto flex flex-wrap items-center justify-end gap-2">' + actions + '</div></div></article>';
+}
+
+function aprAside(u, all) {
+  const pend = all.filter(s => s.estado === 'Pendiente');
+  const sug = pend.reduce((a, s) => a + aprSug(s), 0), tot = pend.reduce((a, s) => a + (Number(s.montoClp) || 0), 0);
+  const ym = todayStr().slice(0, 7);
+  const month = all.filter(s => (s.estado === 'Vinculada' || s.estado === 'Nueva línea') && s.procesado && !isNaN(new Date(s.procesado).getTime()) && ymd(new Date(s.procesado)).slice(0, 7) === ym);
+  const monthAmt = month.reduce((a, s) => a + (Number(s.montoImputado) || 0), 0);
+  const st = aprStatus();
+  let auto;
+  if (st && st.triggerInstalled) auto = badge('Activa · a diario ~' + (st.hour != null ? st.hour : 7) + ':00', 'emerald', 'circle-check');
+  else if (st) auto = badge('Apagada', 'zinc', 'circle-pause');
+  else auto = '<span class="text-xs ' + APR_MUTED + '">' + (u.stErr ? 'No se pudo consultar' : 'Consultando…') + '</span>';
+  const activate = st && !st.triggerInstalled
+    ? '<button type="button" data-action="aprob.go" data-to="#/ajustes" class="group mt-2 inline-flex items-center gap-1 rounded text-xs font-medium text-indigo-600 transition hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400 dark:hover:text-indigo-300">' +
+      'Activar en Ajustes' + icon('arrow-right', 'size-3.5 transition group-hover:translate-x-0.5') + '</button>' : '';
+  const row = (label, right) => '<div class="flex items-center justify-between gap-3 text-xs"><span class="shrink-0 ' + APR_MUTED + '">' + label + '</span>' + right + '</div>';
+  // Una sola tarjeta: lo pendiente (montos), lo registrado este mes y si la lectura automática está activa
+  return card('<div class="p-5"><div class="flex items-center gap-2">' + icon('inbox', 'size-4 shrink-0 text-zinc-400 dark:text-zinc-500') +
+    '<h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Por registrar</h2></div>' +
+    '<div class="mt-3 flex items-baseline gap-2"><span class="text-3xl font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-white">' + pend.length + '</span>' +
+    '<span class="text-sm ' + APR_MUTED + '">' + (pend.length === 1 ? 'solicitud' : 'solicitudes') + '</span></div>' +
+    (pend.length ? '<p class="mt-1 text-xs ' + APR_MUTED + '"><span class="font-medium tabular-nums text-zinc-700 dark:text-zinc-200">' + esc(fmtMoney(sug)) + '</span> sugerido · ' + esc(fmtMoney(tot)) + ' en total</p>' : '') +
+    '<div class="mt-4 space-y-2.5 border-t border-zinc-100 pt-3 dark:border-zinc-800">' +
+    row('Registradas este mes', '<span class="tabular-nums text-zinc-700 dark:text-zinc-200">' + month.length + (month.length ? ' · ' + esc(fmtMoney(monthAmt)) : '') + '</span>') +
+    row('Lectura automática', auto) + '</div>' + activate + aprLastError(st) + '</div>');
+}
+
+// La última revisión (automática o manual) no pudo leer Gmail: se muestra el motivo, sin alarmar
+function aprLastError(st) {
+  const err = st && st.lastResult && st.lastResult.error;
+  if (!err) return '';
+  return '<div class="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900 ring-1 ring-inset ring-amber-600/15 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-400/20">' +
+    icon('circle-alert', 'mt-px size-3.5 shrink-0 text-amber-600 dark:text-amber-400') + '<span class="min-w-0 break-words">La última revisión no pudo leer el correo: ' + esc(String(err).slice(0, 240)) + '</span></div>';
+}
+
+function aprErrBox(st) { const e = aprLastError(st); return e ? '<div class="mx-auto max-w-md px-6 pb-6">' + e + '</div>' : ''; }
+
+function aprEmptyAll(u) {
+  const st = aprStatus();
+  if (S.config && S.config.features && !S.config.features.gmail) return card(emptyState({ icon: 'inbox', title: 'Sin solicitudes', text: 'La lectura de Gmail está desactivada (modo seguro).' }), 'anim-fade-in');
+  const scan = btn({ label: u.scanning ? 'Revisando…' : 'Revisar ahora', icon: 'refresh-cw', variant: 'secondary', action: 'aprob.scan', disabled: u.scanning });
+  if (st && st.triggerInstalled) return card(emptyState({ icon: 'mail-check', title: 'Sin solicitudes por ahora', actionHtml: scan }) + aprErrBox(st), 'anim-fade-in');
+  // Sin lectura automática: lo único que hay que saber es dónde activarla
+  return card(emptyState({
+    icon: 'inbox', title: 'Sin solicitudes', text: 'Activa la lectura de correos en Ajustes.',
+    actionHtml: '<div class="flex flex-wrap items-center justify-center gap-2">' +
+      btn({ label: 'Ir a Ajustes', icon: 'settings', variant: 'primary', action: 'aprob.go', data: { to: '#/ajustes' } }) + scan + '</div>',
+  }) + aprErrBox(st), 'anim-fade-in');
+}
+
+function aprEmptyFilter(u, all) {
+  if (u.q) {
+    const toks = normTxt(u.q).split(/\s+/).filter(Boolean);
+    const elsewhere = u.filter !== 'all' ? all.filter(s => aprMatch(s, toks)).length : 0;
+    return card(emptyState({
+      icon: 'search-x', title: 'Sin resultados',
+      actionHtml: '<div class="flex flex-wrap items-center justify-center gap-2">' + (elsewhere ? btn({ label: 'Ver en Todas (' + elsewhere + ')', icon: 'inbox', variant: 'secondary', action: 'aprob.filter', data: { value: 'all' } }) : '') +
+        btn({ label: 'Limpiar búsqueda', icon: 'x', variant: 'ghost', action: 'aprob.clearQ' }) + '</div>',
+    }));
+  }
+  if (u.filter === 'Pendiente') return card(emptyState({ icon: 'circle-check-big', title: 'Nada pendiente' }));
+  const f = APR_FILTROS.find(x => x.value === u.filter);
+  return card(emptyState({ icon: 'inbox', title: 'Sin ' + (f ? f.label.toLowerCase() : 'solicitudes') }));
+}
+
+/* =====================================================================
+   Vista
+   ===================================================================== */
+function aprRender() {
+  if (!aprIsAdmin()) return card(emptyState({ icon: 'lock', title: 'Sólo para administradores' }));
+  const u = aprUi(), all = aprAll(), counts = aprCounts(all);
+  const head = aprHeader(u);
+  if (!all.length) return head + aprEmptyAll(u);
+  const list = aprVisible(all, u.filter, u.q);
+  const shown = list.slice(0, Math.max(Number(u.limit) || 0, APR_PAGE));
+  const more = list.length - shown.length;
+  const body = list.length
+    ? '<div class="space-y-3">' + shown.map(s => aprCard(s, u)).join('') + '</div>' +
+      (more > 0 ? '<div class="mt-4 flex justify-center">' + btn({ label: 'Mostrar más (quedan ' + more + ')', icon: 'chevron-down', variant: 'secondary', size: 'sm', action: 'aprob.more' }) + '</div>' : '')
+    : aprEmptyFilter(u, all);
+  return head + '<div class="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_18rem]">' +
+    '<div class="min-w-0">' + aprToolbar(u, counts) + body + '</div>' +
+    '<aside class="space-y-4" aria-label="Resumen de solicitudes">' + aprAside(u, all) + '</aside></div>';
+}
+
+function aprMount(root) {
+  aprLoadStatus(false);
+  const u = aprUi();
+  if ((u.flash || []).length) {
+    clearTimeout(APR.flashT);
+    APR.flashT = setTimeout(() => {
+      u.flash = [];
+      document.querySelectorAll('[data-sol-flash]').forEach(el => { el.removeAttribute('data-sol-flash'); APR_FLASH.forEach(c => el.classList.remove(c)); });
+    }, 2600);
+  }
+  if (u.scrollTo) {
+    const id = u.scrollTo;
+    u.scrollTo = '';
+    // Después de que renderView deja el scroll arriba al entrar a la vista
+    setTimeout(() => {
+      const el = Array.from(root.querySelectorAll('[data-sol-id]')).find(x => x.dataset.solId === id);
+      if (el) try { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { el.scrollIntoView(); }
+    }, 60);
+  }
+}
+
+// Global: abre la bandeja con una solicitud a la vista (lo usa el detalle de línea en Presupuesto)
+function aprFocus(id) {
+  const u = aprUi(), s = aprGet(id);
+  u.filter = s ? s.estado : 'all';
+  u.q = '';
+  u.limit = APR_PAGE;
+  if (s) {
+    const pos = aprVisible(aprAll(), u.filter, '').findIndex(x => x.id === id);
+    if (pos >= APR_PAGE) u.limit = pos + 1;
+    u.flash = [id];
+    u.scrollTo = id;
+  }
+  if (typeof currentDrawerKey === 'function' && currentDrawerKey()) closeDrawer();
+  go('#/presupuesto/solicitudes');
+}
+
+/* =====================================================================
+   Acciones sobre una solicitud
+   ===================================================================== */
+function aprScan() {
+  const u = aprUi();
+  if (u.scanning) return;
+  u.scanning = true;
+  aprRerenderIf();
+  const before = {};
+  aprAll().forEach(s => { before[s.id] = 1; });
+  mutate('aprobScan', [], { silent: true }).then(b => {
+    if (!b) return;
+    const r = b.lastScan || {};
+    u.st = b.aprob || Object.assign({}, aprStatus() || {}, { lastScan: r.at || new Date().toISOString(), lastResult: r });
+    u.stAt = Date.now();
+    if (b.stale) return;
+    const fresh = aprAll().filter(s => !before[s.id]).map(s => s.id);
+    if (fresh.length) { u.filter = 'Pendiente'; u.q = ''; u.flash = fresh; }
+    toast(aprScanMsg(r), Number(r.added) || Number(r.updated) ? 'success' : 'info');
+  }).finally(() => { u.scanning = false; aprRerenderIf(); });
+}
+
+// Resumen compacto de la solicitud dentro de los modales
+function aprSolMini(s) {
+  const who = [aprTitle(s.solicitante), aprTitle(s.proveedor)].filter(Boolean).join(' · ');
+  return '<div class="flex items-start gap-3 rounded-xl bg-zinc-50 px-3.5 py-3 ring-1 ring-inset ring-zinc-200/70 dark:bg-zinc-800/50 dark:ring-zinc-700/60">' +
+    '<div class="min-w-0 flex-1">' + (s.pr ? '<p class="font-mono text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">' + esc(s.pr) + '</p>' : '') +
+    '<p class="truncate text-sm font-semibold text-zinc-900 dark:text-white">' + esc(s.nombre || s.asunto || 'Solicitud de compra') + '</p>' +
+    (who ? '<p class="mt-0.5 truncate text-xs ' + APR_MUTED + '">' + esc(who) + '</p>' : '') + '</div>' +
+    '<div class="shrink-0 text-right"><p class="text-sm font-semibold tabular-nums text-zinc-900 dark:text-white">' + esc(fmtMoney(aprSug(s))) + '</p>' +
+    '<p class="text-[11px] ' + APR_MUTED + '">sugerido' + (s.montoClp && aprSug(s) !== Number(s.montoClp) ? ' de ' + esc(fmtCompact(s.montoClp)) : '') + '</p></div></div>';
+}
+
+function aprYearOpts() { return (S.years || []).map(y => ({ value: y, label: String(y) })); }
+
+function aprLineOption(l, s, pre, mention, showPillar) {
+  const imp = aprImputed(l.id, s.id);
+  const p = PIL(l.pilar);
+  const oc = l.oc === 'Si' ? 'Sí' : l.oc === 'No' ? 'No' : '—';
+  const hay = normTxt([l.proj, l.nota, l.area, p ? p.label : '', l.resp ? userName(l.resp) : '', l.clas].join(' '));
+  const chips = (showPillar && p ? badge(p.label, p.color, p.icon) : '') +
+    (mention ? badge('Menciona ' + s.pr, 'indigo', 'sparkles') : '') +
+    (imp.n ? '<span title="Ya imputado por otras solicitudes">' + badge(plural(imp.n, 'solicitud', 'solicitudes') + ' · ' + fmtMoney(imp.monto), 'zinc', 'receipt') + '</span>' : '');
+  return '<label data-apr-line data-hay="' + esc(hay) + '" class="flex cursor-pointer items-start gap-3 border-b border-zinc-100 px-3 py-2.5 transition last:border-b-0 hover:bg-zinc-50 has-[:checked]:bg-indigo-50/80 dark:border-zinc-800/70 dark:hover:bg-zinc-800/40 dark:has-[:checked]:bg-indigo-500/10">' +
+    '<input type="radio" name="lineId" value="' + esc(l.id) + '"' + (l.id === pre ? ' checked' : '') + ' class="mt-0.5 size-4 shrink-0 accent-indigo-600">' +
+    '<span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">' + esc(l.proj || 'Sin nombre') + '</span>' +
+    '<span class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs tabular-nums ' + APR_MUTED + '"><span>Final ' + esc(fmtMoney(l.pf)) + '</span><span>Pagado ' + esc(fmtMoney(l.pg)) + '</span>' +
+    '<span>OC ' + oc + '</span>' + (l.clas ? '<span>' + esc(l.clas) + '</span>' : '') + '</span>' +
+    (chips ? '<span class="mt-1.5 flex flex-wrap gap-1">' + chips + '</span>' : '') + '</span></label>';
+}
+
+function aprLineOptions(s, year) {
+  const lines = budgetLines(year);
+  if (!lines.length) return '<div class="px-4 py-8 text-center text-sm ' + APR_MUTED + '">Cuadre ' + esc(year) + ' aún no tiene líneas.</div>';
+  const sug = aprSuggest(s, lines);
+  const sugIds = {}, ment = {};
+  sug.forEach(x => { sugIds[x.l.id] = 1; if (x.mention) ment[x.l.id] = 1; });
+  const mentions = Object.keys(ment);
+  const pre = s.lineId && lines.some(l => l.id === s.lineId) ? s.lineId : mentions.length === 1 ? mentions[0] : '';
+  const byName = (a, b) => String(a.proj || '').localeCompare(String(b.proj || ''), 'es', { sensitivity: 'base' });
+  const groups = [];
+  if (sug.length) groups.push({ label: 'Sugeridas', icon: 'sparkles', lines: sug.map(x => x.l), sug: true });
+  S.pillars.forEach(p => groups.push({ label: p.label, icon: p.icon, lines: lines.filter(l => l.pilar === p.key && !sugIds[l.id]).sort(byName) }));
+  const orph = lines.filter(l => !PIL(l.pilar) && !sugIds[l.id]).sort(byName);
+  if (orph.length) groups.push({ label: 'Sin área', icon: 'circle-help', lines: orph });
+  return groups.filter(g => g.lines.length).map(g => '<div data-apr-group role="group" aria-label="' + esc(g.label) + '">' +
+    '<div class="sticky top-0 z-[1] flex items-center gap-1.5 border-b border-zinc-100 bg-zinc-50/95 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-900/95 dark:text-zinc-400">' +
+    icon(g.icon, 'size-3.5 shrink-0') + esc(g.label) + '<span class="font-normal tabular-nums normal-case tracking-normal text-zinc-400 dark:text-zinc-500">' + g.lines.length + '</span></div>' +
+    g.lines.map(l => aprLineOption(l, s, pre, !!ment[l.id], !!g.sug)).join('') + '</div>').join('') +
+    '<p data-apr-none class="hidden px-4 py-8 text-center text-sm ' + APR_MUTED + '">Sin resultados</p>';
+}
+
+function aprFilterLines(box, q) {
+  const toks = normTxt(q).split(/\s+/).filter(Boolean);
+  let any = false;
+  box.querySelectorAll('[data-apr-group]').forEach(g => {
+    let n = 0;
+    g.querySelectorAll('[data-apr-line]').forEach(r => {
+      const show = toks.every(t => (r.dataset.hay || '').indexOf(t) >= 0);
+      r.classList.toggle('hidden', !show);
+      if (show) n++;
+    });
+    g.classList.toggle('hidden', !n);
+    if (n) any = true;
+  });
+  const none = box.querySelector('[data-apr-none]');
+  if (none) none.classList.toggle('hidden', any);
+}
+
+function aprFormKeys(form, submit) {
+  form.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    const t = e.target;
+    if ((t.tagName === 'INPUT' && t.type !== 'search' && t.type !== 'radio' && t.type !== 'checkbox') || (t.tagName === 'TEXTAREA' && (e.metaKey || e.ctrlKey))) { e.preventDefault(); submit(); }
+  });
+}
+function aprToastLine(msg, lineId) {
+  const can = lineId && IDX.line && IDX.line.get(lineId) && typeof openLine === 'function';
+  toast(msg, 'success', can ? { actionLabel: 'Ver línea', onAction: () => openLine(lineId) } : {});
+}
+
+/* ---------- Vincular a una línea existente ---------- */
+function aprOpenLink(id) {
+  const s = aprGet(id);
+  if (!s) { toast('No encontré la solicitud (puede haberse actualizado).', 'error'); return; }
+  if (!(S.years || []).length) { toast('Aún no hay pestañas «Cuadre AAAA» en la planilla.', 'error'); return; }
+  const y0 = aprDefaultYear(s, S.years, S.year);
+  const own = (s.cecos || []).some(c => c.propio);
+  const body = '<div data-apr-form class="space-y-4">' + aprSolMini(s) +
+    '<div><div class="grid grid-cols-[minmax(0,1fr)_6.5rem] items-end gap-2">' +
+    '<div class="min-w-0"><label for="apr-line-q" class="' + CX.label + '">Línea de presupuesto</label><div class="relative">' +
+    '<span class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-zinc-400">' + icon('search', 'size-4') + '</span>' +
+    '<input id="apr-line-q" type="search" data-apr-q autocomplete="off" placeholder="Buscar por nombre, nota o responsable…" class="' + CX.input + ' pl-9"></div></div>' +
+    selectField({ name: 'year', label: 'Cuadre', value: y0, options: aprYearOpts(), attrs: 'data-apr-year="1" title="Año del presupuesto"' }) + '</div>' +
+    '<div data-apr-lines role="radiogroup" aria-label="Líneas de presupuesto" class="mt-2 max-h-72 overflow-y-auto overscroll-contain rounded-xl border border-zinc-200 dark:border-zinc-800">' + aprLineOptions(s, y0) + '</div></div>' +
+    '<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">' +
+    field({ name: 'monto', type: 'money', label: 'Monto a imputar', value: aprSug(s), hint: esc(own ? 'La parte de tu CeCo.' : 'El total de la solicitud.') }) +
+    '<label class="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2.5 ring-1 ring-inset ring-zinc-200 transition hover:bg-zinc-50 sm:mt-6 sm:self-start dark:ring-zinc-800 dark:hover:bg-zinc-800/50">' +
+    '<input type="checkbox" name="marcarOc" checked class="mt-0.5 size-4 shrink-0 accent-indigo-600">' +
+    '<span class="min-w-0 text-sm font-medium text-zinc-900 dark:text-zinc-100">Marcar OC emitida en la línea</span></label></div>' +
+    field({ name: 'nota', type: 'textarea', rows: 2, label: 'Nota (opcional)', placeholder: 'Ej: primera cuota, ajuste de alcance…' }) + '</div>';
+  openModal({
+    title: 'Vincular a una línea', size: 'lg', iconHtml: '<span class="grid size-10 shrink-0 place-items-center rounded-xl ' + tone('indigo').iconbox + '">' + icon('link-2', 'size-5') + '</span>',
+    body: body,
+    footer: btn({ label: 'Cancelar', variant: 'secondary', attrs: 'data-apr-cancel' }) + btn({ label: 'Vincular', icon: 'link-2', variant: 'primary', attrs: 'data-apr-ok' }),
+    onMount: (el, close) => {
+      const form = el.querySelector('[data-apr-form]'), box = el.querySelector('[data-apr-lines]');
+      const q = el.querySelector('[data-apr-q]'), ysel = el.querySelector('[data-apr-year]'), ok = el.querySelector('[data-apr-ok]');
+      const filter = () => aprFilterLines(box, q.value);
+      q.addEventListener('input', filter);
+      // Enter en el buscador: si queda una sola línea visible, se elige
+      q.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' || e.isComposing) return;
+        e.preventDefault();
+        const vis = Array.from(box.querySelectorAll('[data-apr-line]')).filter(r => !r.classList.contains('hidden'));
+        if (vis.length === 1) { const r = vis[0].querySelector('input'); if (r) { r.checked = true; r.focus(); } }
+      });
+      ysel.addEventListener('change', () => { box.innerHTML = aprLineOptions(s, Number(ysel.value)); refreshIcons(box); filter(); });
+      const submit = () => {
+        if (ok.disabled) return;
+        const v = readForm(form);
+        if (!v.lineId) { toast('Elige la línea donde queda este gasto.', 'info'); q.focus(); return; }
+        if (!(Number(v.monto) > 0)) { toast('Indica el monto a imputar.', 'info'); const m = form.querySelector('[name="monto"]'); if (m) m.focus(); return; }
+        const payload = aprLinkPayload(v), l = IDX.line.get(payload.lineId);
+        ok.disabled = true;
+        mutate('aprobLink', [s.id, payload], { silent: true }).then(b => {
+          if (!b) { ok.disabled = false; return; }
+          close();
+          if (!b.stale) aprToastLine('Registrada en «' + (l ? l.proj : 'la línea') + '»', payload.lineId);
+        });
+      };
+      ok.addEventListener('click', submit);
+      el.querySelector('[data-apr-cancel]').addEventListener('click', () => close());
+      aprFormKeys(form, submit);
+      const pre = box.querySelector('input:checked');
+      if (pre) { const row = pre.closest('[data-apr-line]'); if (row) try { row.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+    },
+  });
+}
+
+/* ---------- Crear una línea nueva (Fuera de POA) ---------- */
+function aprOpenNewLine(id) {
+  const s = aprGet(id);
+  if (!s) { toast('No encontré la solicitud (puede haberse actualizado).', 'error'); return; }
+  if (!(S.years || []).length) { toast('Aún no hay pestañas «Cuadre AAAA» en la planilla.', 'error'); return; }
+  const y0 = aprDefaultYear(s, S.years, S.year);
+  const pil = aprGuessPilar(s);
+  const auto = [s.pr, aprTitle(s.solicitante)].filter(Boolean).join(' · ');
+  const body = '<div data-apr-form class="space-y-4">' + aprSolMini(s) +
+    '<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">' +
+    field({ name: 'proj', label: 'Nombre de la línea', value: s.nombre || '', required: true, cls: 'sm:col-span-2', attrs: 'maxlength="250" autocomplete="off"' }) +
+    selectField({ name: 'area', label: 'Área', value: pil, required: true, options: S.pillars.map(p => ({ value: p.key, label: p.label })), placeholder: pil ? null : 'Elegir área…' }) +
+    selectField({ name: 'year', label: 'Año', value: y0, options: aprYearOpts(), attrs: 'data-apr-year="1"' }) +
+    field({ name: 'monto', type: 'money', label: 'Monto final proyectado', value: aprSug(s) }) +
+    field({ name: 'nota', label: 'Nota adicional (opcional)', placeholder: auto ? 'Se anota sola: ' + auto : 'Contexto, N° de OC…', attrs: 'autocomplete="off"' }) + '</div>' +
+    '<div class="flex items-start gap-2 rounded-lg bg-sky-50 px-3 py-2.5 text-xs leading-relaxed text-sky-900 ring-1 ring-inset ring-sky-600/15 dark:bg-sky-500/10 dark:text-sky-200 dark:ring-sky-400/20">' +
+    icon('info', 'mt-px size-3.5 shrink-0') + '<span>Se agrega a <b class="font-semibold">Cuadre <span data-apr-year-txt>' + esc(y0) + '</span></b> como <b class="font-semibold">Fuera de POA</b>, con OC «Sí» y el PR en la nota.</span></div></div>';
+  openModal({
+    title: 'Crear línea nueva', size: 'md', iconHtml: '<span class="grid size-10 shrink-0 place-items-center rounded-xl ' + tone('sky').iconbox + '">' + icon('list-plus', 'size-5') + '</span>',
+    body: body,
+    footer: btn({ label: 'Cancelar', variant: 'secondary', attrs: 'data-apr-cancel' }) + btn({ label: 'Crear línea', icon: 'plus', variant: 'primary', attrs: 'data-apr-ok' }),
+    onMount: (el, close) => {
+      const form = el.querySelector('[data-apr-form]'), ok = el.querySelector('[data-apr-ok]');
+      const ysel = el.querySelector('[data-apr-year]'), ytxt = el.querySelector('[data-apr-year-txt]');
+      if (ysel && ytxt) ysel.addEventListener('change', () => { ytxt.textContent = ysel.value; });
+      const focusOn = n => { const f = form.querySelector('[name="' + n + '"]'); if (f) f.focus(); };
+      const submit = () => {
+        if (ok.disabled) return;
+        const v = readForm(form);
+        if (!String(v.proj || '').trim()) { toast('Escribe el nombre de la línea.', 'info'); focusOn('proj'); return; }
+        if (!v.area) { toast('Elige el área de la línea.', 'info'); focusOn('area'); return; }
+        if (!(Number(v.monto) > 0)) { toast('Indica el monto de la línea.', 'info'); focusOn('monto'); return; }
+        const payload = aprNewLinePayload(v);
+        ok.disabled = true;
+        mutate('aprobNewLine', [s.id, payload], { silent: true }).then(b => {
+          if (!b) { ok.disabled = false; return; }
+          close();
+          if (b.stale) return;
+          const cur = aprGet(s.id);
+          aprToastLine('Línea creada en Cuadre ' + payload.year, (cur && cur.lineId) || (IDX.line && IDX.line.get(b.lastId) ? b.lastId : ''));
+        });
+      };
+      ok.addEventListener('click', submit);
+      el.querySelector('[data-apr-cancel]').addEventListener('click', () => close());
+      aprFormKeys(form, submit);
+    },
+  });
+}
+
+/* ---------- Descartar / deshacer (instantáneo) ---------- */
+function aprApply(fn, local, args, opts) {
+  if (typeof optimistic === 'function') return optimistic(local, fn, args, opts || {});
+  return mutate(fn, args, { success: (opts && opts.success) || '', silent: !(opts && opts.success) });
+}
+function aprDiscard(id) {
+  const s = aprGet(id);
+  if (!s) return;
+  promptDialog({ title: 'Descartar ' + (s.pr || 'solicitud'), label: 'Motivo (opcional)', placeholder: 'Ej: no es de nuestro presupuesto', confirmLabel: 'Descartar' }).then(m => {
+    if (m === null) return;
+    const cur = aprGet(id);
+    if (!cur) { toast('No encontré la solicitud (puede haberse actualizado).', 'error'); return; }
+    aprApply('aprobDiscard', () => { Object.assign(cur, { estado: 'Descartada', anio: '', lineId: '', montoImputado: 0, nota: m, procesadoPor: myEmail(), procesado: new Date().toISOString() }); }, [id, m])
+      .then(b => { if (b && !b.stale) toast((cur.pr || 'Solicitud') + ' descartada', 'success', { actionLabel: 'Deshacer', onAction: () => aprReset(id, true) }); });
+  });
+}
+function aprReset(id, quiet) {
+  const s = aprGet(id);
+  if (!s || s.estado === 'Pendiente') return;
+  const doIt = () => {
+    const cur = aprGet(id);
+    if (!cur || cur.estado === 'Pendiente') return;
+    // Igual que el servidor: vuelve sin línea ni monto (el presupuesto no se toca)
+    aprApply('aprobReset', () => { Object.assign(cur, { estado: 'Pendiente', anio: '', lineId: '', montoImputado: 0, procesadoPor: '', procesado: '' }); }, [id], { success: (cur.pr || 'La solicitud') + ' volvió a pendientes' });
+  };
+  if (quiet || s.estado === 'Descartada') { doIt(); return; }
+  confirmDialog({
+    title: '¿Volver a pendientes?', confirmLabel: 'Volver a pendientes',
+    message: 'La solicitud vuelve a «Pendientes» para registrarla de nuevo. La línea de presupuesto queda tal como está; si hace falta, ajústala a mano.',
+  }).then(ok => { if (ok) doIt(); });
+}
+
+/* =====================================================================
+   Registro de vista y acciones
+   ===================================================================== */
+registerView('budget.approvals', { title: 'Solicitudes de compra', render: aprRender, mount: aprMount });
+
+action('aprob.filter', d => { const u = aprUi(); u.filter = d.value || 'Pendiente'; u.limit = APR_PAGE; rerender(); });
+action('aprob.q', (d, el) => { const u = aprUi(); u.q = el.value; u.limit = APR_PAGE; clearTimeout(APR.t); APR.t = setTimeout(aprRerenderIf, 140); });
+action('aprob.clearQ', () => { aprUi().q = ''; rerender(); const q = document.getElementById('q-aprob'); if (q) q.focus(); });
+action('aprob.more', () => { const u = aprUi(); u.limit = Math.max(Number(u.limit) || 0, APR_PAGE) + APR_PAGE; rerender(); });
+action('aprob.scan', () => aprScan());
+action('aprob.link', d => aprOpenLink(d.id));
+action('aprob.newLine', d => aprOpenNewLine(d.id));
+action('aprob.discard', d => aprDiscard(d.id));
+action('aprob.reset', d => aprReset(d.id));
+action('aprob.openLine', d => {
+  if (typeof openLine === 'function') openLine(d.id);
+  else go('#/presupuesto/lineas');
+});
+action('aprob.go', d => { if (d.to) go(d.to); });
+</script>

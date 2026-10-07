@@ -1,0 +1,1343 @@
+<script>
+/* =====================================================================
+   VAdmin · vistas 'cascade' (Indicadores Cascade), 'history' (Historial,
+   sólo administración) y 'settings' (Ajustes: perfil, privacidad, avisos y,
+   para administración, «Ver como admin», carpetas de Drive, proyectos desde
+   Cascade y solicitudes de Ariba).
+   Ver dev/SPEC.md §5, §6.4, §7, §9, §11, §13, §14. Prefijo global: adm* / ADM_*
+   v3.1 (§14.4): menos texto; lo de administración sigue isAdminUI() (con «Ver como
+   admin» apagado, Gonzalo ve exactamente lo que ve el equipo; el interruptor sí queda).
+   ===================================================================== */
+
+const ADM_HIST_PAGE = 120;
+const ADM_T = {};
+const ADM_ETIQUETAS = ['Iniciativa', 'Iniciativa Estratégica Organizacional', 'Colaboración I. Estratégica'];
+const ADM_CLASES = ['kpi', 'accion', 'objetivo', 'hito'];
+const ADM_CLASE_DESC = {
+  kpi: 'Métrica con meta',
+  accion: 'Actividad a ejecutar',
+  objetivo: 'Resultado esperado',
+  hito: 'Entregable o fecha clave',
+};
+const ADM_KINDS = {
+  create: { label: 'Crear', icon: 'plus', tone: 'emerald' },
+  edit: { label: 'Editar', icon: 'pencil', tone: 'indigo' },
+  complete: { label: 'Completar', icon: 'circle-check', tone: 'emerald' },
+  comment: { label: 'Comentar', icon: 'message-square', tone: 'sky' },
+  delete: { label: 'Eliminar', icon: 'trash', tone: 'red' },
+  notif: { label: 'Notificación', icon: 'bell', tone: 'amber' },
+  other: { label: 'Otro', icon: 'circle-dot', tone: 'zinc' },
+};
+const ADM_DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+
+/* ---------- Estado y utilidades locales ---------- */
+function admState() {
+  S.ui.admin = S.ui.admin || { pilar: 'cc', open: {}, histQ: '', histUser: 'all', hist: null, status: null };
+  const A = S.ui.admin;
+  if (!A.open) A.open = {};
+  if (A.casQ == null) A.casQ = '';
+  if (A.histType == null) A.histType = 'all';
+  if (A.histShow == null) A.histShow = ADM_HIST_PAGE;
+  if (!A.busy) A.busy = {};
+  if (!(S.pillars || []).some(p => p.key === A.pilar)) A.pilar = ((S.pillars || [])[0] || {}).key || 'cc';
+  return A;
+}
+function admLater(key, fn, ms) { clearTimeout(ADM_T[key]); ADM_T[key] = setTimeout(fn, ms); }
+function admRerenderIf(view) { if (S && S.route && S.route.name === view) rerender(); }
+// Resalta coincidencias (sin romper entidades HTML)
+function admHl(text, q) {
+  const s = String(text == null ? '' : text), qq = String(q || '').trim();
+  if (!qq) return esc(s);
+  const lo = s.toLowerCase(), ql = qq.toLowerCase();
+  let out = '', i = 0, k;
+  while ((k = lo.indexOf(ql, i)) >= 0) {
+    out += esc(s.slice(i, k)) + '<mark class="hl">' + esc(s.slice(k, k + ql.length)) + '</mark>';
+    i = k + ql.length;
+  }
+  return out + esc(s.slice(i));
+}
+function admSpin(label) {
+  return btn({ label: label, icon: 'loader-circle', variant: 'secondary', disabled: true, cls: '[&_svg]:animate-spin' });
+}
+function admIconBox(name, t, cls) {
+  return '<span class="grid shrink-0 place-items-center rounded-lg ' + tone(t).iconbox + ' ' + (cls || 'size-9') + '">' + icon(name, 'size-4') + '</span>';
+}
+function admKbd(keys) {
+  return '<span class="inline-flex items-center gap-1">' + keys.map(k => '<kbd class="' + CX.kbd + '">' + esc(k) + '</kbd>').join('') + '</span>';
+}
+// Administración en pantalla (respeta «Ver como admin»); admRealAdmin = la cuenta lo es (sólo para el interruptor)
+function admIsAdmin() { return typeof isAdminUI === 'function' ? isAdminUI() : !!(S && S.me && S.me.admin); }
+function admRealAdmin() { return !!(S && S.me && S.me.admin); }
+
+/* =====================================================================
+   1) Indicadores Cascade
+   ===================================================================== */
+function admEtqTone(e) {
+  const n = normTxt(e);
+  if (n === 'iniciativa') return 'indigo';
+  if (n.indexOf('iniciativa estrategica') === 0) return 'amber';
+  return 'zinc';
+}
+function admEtqTag(e) {
+  const s = String(e || '').trim();
+  if (!s || s === '—' || s === '-') return '';
+  return '<span class="inline-flex max-w-full items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300" title="Etiqueta en Cascade">' +
+    '<span class="size-2 shrink-0 rounded-[3px] ' + tone(admEtqTone(s)).dot + '" aria-hidden="true"></span><span class="truncate">' + esc(s) + '</span></span>';
+}
+function admTasksByCascade() {
+  const m = new Map();
+  (S.tasks || []).forEach(t => {
+    if (!t.cascade) return;
+    if (!m.has(t.cascade)) m.set(t.cascade, []);
+    m.get(t.cascade).push(t);
+  });
+  return m;
+}
+function admProjectsByCascade() {
+  const m = new Map();
+  (S.projects || []).forEach(p => {
+    if (!p.cascade) return;
+    if (!m.has(p.cascade)) m.set(p.cascade, []);
+    m.get(p.cascade).push(p);
+  });
+  return m;
+}
+function admItemStats(list) {
+  const pend = list.filter(t => t.estado !== 'Realizada');
+  const done = list.filter(t => t.estado === 'Realizada');
+  return {
+    total: list.length,
+    pending: pend.length,
+    overdue: pend.filter(t => dueInfo(t).key === 'overdue').length,
+    done: done.length,
+    doneYear: done.filter(t => taskInYear(t, S.year)).length,
+  };
+}
+function admIsOpen(A, id) { return A.open[id] !== false; }
+function admEnt(x, patch) {
+  return Object.assign({
+    tipo: 'Cascade', id: x.id, pilar: x.pilar, padre: x.padre || '', nombre: x.nombre,
+    etiqueta: x.etiqueta || '', clase: x.clase || (x.padre ? 'accion' : 'grupo'), orden: Number(x.orden) || 0,
+  }, patch || {});
+}
+function admNextOrden(list) { return (list || []).reduce((m, x) => Math.max(m, Number(x.orden) || 0), 0) + 1; }
+function admSiblings(it) { return it.padre ? (IDX.cascadeChildren.get(it.padre) || []) : (IDX.cascadeGroups[it.pilar] || []); }
+
+function admCascadeView() {
+  const A = admState();
+  const pil = PIL(A.pilar);
+  const groups = IDX.cascadeGroups[A.pilar] || [];
+  const tmap = admTasksByCascade();
+  const pmap = admProjectsByCascade();
+  const q = normTxt(A.casQ);
+  const anim = A.justOpened; A.justOpened = null;
+
+  const shown = groups.map(g => {
+    const kids = IDX.cascadeChildren.get(g.id) || [];
+    if (!q) return { g: g, kids: kids, all: kids };
+    if (normTxt(g.nombre + ' ' + (g.etiqueta || '')).indexOf(q) >= 0) return { g: g, kids: kids, all: kids };
+    const km = kids.filter(c => normTxt(c.nombre).indexOf(q) >= 0);
+    return km.length ? { g: g, kids: km, all: kids } : null;
+  }).filter(Boolean);
+
+  const header = pageHeader({
+    title: 'Indicadores Cascade', icon: 'target', tone: 'violet',
+    right: btn({ label: 'Nuevo grupo', icon: 'plus', variant: 'primary', action: 'cascade.newGroup' }),
+  });
+
+  const toolbar = '<div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">' +
+    segmented({
+      value: A.pilar, action: 'cascade.pilar',
+      options: S.pillars.map(p => ({ value: p.key, label: p.label, icon: p.icon })),
+    }) +
+    '<div class="flex items-center gap-1.5">' +
+    searchInput({ id: 'q-cascade', input: 'cascade.q', value: A.casQ, placeholder: 'Buscar indicador…', cls: 'w-full sm:w-64' }) +
+    iconBtn({ icon: 'chevrons-up-down', action: 'cascade.expandAll', title: 'Expandir todo' }) +
+    iconBtn({ icon: 'chevrons-down-up', action: 'cascade.collapseAll', title: 'Contraer todo' }) +
+    '</div></div>';
+
+  let tree;
+  if (!groups.length) {
+    tree = card(emptyState({
+      icon: 'target', title: 'Sin indicadores en ' + (pil ? pil.label : 'este pilar'),
+      actionHtml: btn({ label: 'Nuevo grupo', icon: 'plus', variant: 'primary', action: 'cascade.newGroup' }),
+    }));
+  } else if (!shown.length) {
+    tree = card(emptyState({ icon: 'search', title: 'Sin resultados' }));
+  } else {
+    tree = '<div class="space-y-3">' + shown.map(x => admGroupCard(A, x.g, x.kids, x.all, tmap, !!q, anim === x.g.id, pmap)).join('') + '</div>';
+  }
+
+  // §14.4: sin columna de cifras ni leyenda (el tipo ya va en cada fila)
+  return '<div class="max-w-5xl">' + header + toolbar + tree + '</div>';
+}
+
+function admGroupCard(A, g, kids, all, tmap, searching, anim, pmap) {
+  const open = searching || admIsOpen(A, g.id);
+  const st = admItemStats(all.reduce((a, c) => a.concat(tmap.get(c.id) || []), []));
+  // Sólo lo que pide atención: pendientes (y atrasadas en rojo); sin conteos de indicadores
+  const pendTxt = st.pending ? '<span class="tabular-nums">' + esc(plural(st.pending, 'pendiente', 'pendientes')) + '</span>' : '';
+  const lateTxt = st.overdue ? '<span class="inline-flex items-center gap-1 font-medium text-red-600 dark:text-red-400">' + icon('triangle-alert', 'size-3') + esc(plural(st.overdue, 'atrasada', 'atrasadas')) + '</span>' : '';
+
+  const head = '<div class="flex items-center gap-2 px-2 py-2 sm:gap-3 sm:px-3">' +
+    '<button type="button" id="cas-tg-' + esc(g.id) + '" data-action="cascade.toggle" data-id="' + esc(g.id) + '" aria-expanded="' + open + '" title="' + (open ? 'Contraer' : 'Expandir') + '" class="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg p-1 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 sm:gap-3">' +
+    '<span class="grid size-5 shrink-0 place-items-center text-zinc-400 transition-transform duration-200 dark:text-zinc-500 ' + (open ? 'rotate-90' : '') + '">' + icon('chevron-right', 'size-4') + '</span>' +
+    '<span class="grid size-9 shrink-0 place-items-center rounded-lg bg-violet-50 text-violet-600 ring-1 ring-inset ring-violet-500/15 dark:bg-violet-500/15 dark:text-violet-300 dark:ring-violet-400/20">' + icon('target', 'size-4') + '</span>' +
+    '<span class="min-w-0 flex-1">' +
+    '<span class="line-clamp-2 break-words text-sm font-semibold text-zinc-900 dark:text-zinc-100">' + admHl(g.nombre, A.casQ) + '</span>' +
+    '<span class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400">' + admEtqTag(g.etiqueta) + pendTxt + lateTxt + '</span></span></button>' +
+    '<div class="flex shrink-0 items-center">' +
+    iconBtn({ icon: 'plus', action: 'cascade.addItem', data: { padre: g.id }, title: 'Agregar indicador' }) +
+    iconBtn({ icon: 'pencil', action: 'cascade.edit', data: { id: g.id }, title: 'Editar grupo' }) +
+    iconBtn({ icon: 'trash', action: 'cascade.delete', data: { id: g.id }, title: 'Eliminar grupo', variant: 'danger-ghost' }) +
+    '</div></div>';
+
+  let body = '';
+  if (open) {
+    const sibs = IDX.cascadeChildren.get(g.id) || [];
+    body = '<div class="border-t border-zinc-100 py-1.5 dark:border-zinc-800/80 ' + (anim ? 'anim-fade-in' : '') + '">' +
+      (kids.length ? kids.map((c, i) => admChildRow(A, c, i === kids.length - 1, sibs, tmap, searching, pmap)).join('') :
+        '<div class="py-2 pl-9 pr-3 sm:pl-[4.75rem]">' +
+        btn({ label: 'Agregar indicador', icon: 'plus', size: 'sm', variant: 'ghost', action: 'cascade.addItem', data: { padre: g.id } }) + '</div>') +
+      '</div>';
+  }
+  return '<section class="' + CX.card + ' overflow-hidden" aria-label="' + esc(g.nombre) + '">' + head + body + '</section>';
+}
+
+function admChildRow(A, c, last, sibs, tmap, searching, pmap) {
+  const meta = CLASE_META[c.clase] || CLASE_META.accion;
+  const st = admItemStats(tmap.get(c.id) || []);
+  const projs = (pmap && pmap.get(c.id)) || [];
+  const idx = sibs.findIndex(x => x.id === c.id);
+  const parts = [];
+  // Los proyectos importados desde Cascade llevan el mismo nombre que el indicador: ese caso (casi todos) no se
+  // muestra; sólo un proyecto con otro nombre, o varios, aportan algo (§14.4)
+  const same = projs.length === 1 && normTxt(projs[0].nombre) === normTxt(c.nombre);
+  if (projs.length && !same) {
+    parts.push('<span class="inline-flex min-w-0 max-w-full items-center gap-1" title="' + esc(projs.map(p => p.nombre).join(' · ')) + '">' + icon('folder-kanban', 'size-3 shrink-0') +
+      '<span class="truncate">' + esc(projs.length > 1 ? plural(projs.length, 'proyecto', 'proyectos') : projs[0].nombre) + '</span></span>');
+  }
+  // §14.4: tipo + proyecto + pendientes/atrasadas; sin «realizadas» ni última actividad (están en el panel)
+  if (st.pending) parts.push('<span class="tabular-nums">' + esc(plural(st.pending, 'pendiente', 'pendientes')) + '</span>');
+  if (st.overdue) parts.push('<span class="inline-flex items-center gap-1 font-medium text-red-600 dark:text-red-400">' + icon('triangle-alert', 'size-3') + esc(plural(st.overdue, 'atrasada', 'atrasadas')) + '</span>');
+
+  const guide = '<span aria-hidden="true" class="pointer-events-none absolute left-[1.375rem] top-0 w-px bg-zinc-200 sm:left-[4.125rem] dark:bg-zinc-800 ' + (last ? 'h-1/2' : 'bottom-0') + '"></span>' +
+    '<span aria-hidden="true" class="pointer-events-none absolute left-[1.375rem] top-1/2 h-px w-2.5 bg-zinc-200 sm:left-[4.125rem] dark:bg-zinc-800"></span>';
+
+  const actions = '<div class="hidden shrink-0 items-center gap-0.5 transition-opacity sm:flex pointer-fine:opacity-0 pointer-fine:group-hover/row:opacity-100 pointer-fine:focus-within:opacity-100">' +
+    btn({ label: 'Tarea', icon: 'plus', size: 'sm', variant: 'ghost', action: 'cascade.newTask', data: { id: c.id }, title: 'Nueva tarea vinculada a este indicador' }) +
+    (searching ? '' :
+      iconBtn({ icon: 'arrow-up', action: 'cascade.move', data: { id: c.id, dir: 'up' }, title: 'Subir', attrs: 'id="cas-up-' + esc(c.id) + '"' + (idx <= 0 ? ' disabled' : '') }) +
+      iconBtn({ icon: 'arrow-down', action: 'cascade.move', data: { id: c.id, dir: 'down' }, title: 'Bajar', attrs: 'id="cas-dn-' + esc(c.id) + '"' + (idx < 0 || idx >= sibs.length - 1 ? ' disabled' : '') })) +
+    iconBtn({ icon: 'pencil', action: 'cascade.edit', data: { id: c.id }, title: 'Editar indicador' }) +
+    iconBtn({ icon: 'trash', action: 'cascade.delete', data: { id: c.id }, title: 'Eliminar indicador', variant: 'danger-ghost' }) +
+    '</div>';
+
+  return '<div class="group/row relative flex items-center gap-1 py-0.5 pl-9 pr-2 sm:pl-[4.75rem] sm:pr-3">' + guide +
+    '<button type="button" id="cas-it-' + esc(c.id) + '" data-action="cascade.openItem" data-id="' + esc(c.id) + '" class="flex min-w-0 flex-1 items-center gap-3 rounded-lg px-2 py-2 text-left transition hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:bg-zinc-800/60">' +
+    '<span class="grid size-8 shrink-0 place-items-center rounded-lg ' + tone(meta.tone).iconbox + '">' + icon(meta.icon, 'size-4') + '</span>' +
+    '<span class="min-w-0 flex-1"><span class="line-clamp-2 break-words text-sm font-medium text-zinc-800 dark:text-zinc-100">' + admHl(c.nombre, A.casQ) + '</span>' +
+    '<span class="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400">' + badge(meta.label, meta.tone) + parts.join('') + '</span></span>' +
+    '<span class="shrink-0 text-zinc-300 sm:hidden dark:text-zinc-600">' + icon('chevron-right', 'size-4') + '</span>' +
+    '</button>' + actions + '</div>';
+}
+
+/* ---------- Drawer de un indicador ---------- */
+function admOpenItem(id) {
+  openDrawer({ key: 'cascade:' + id, width: 'lg', render: () => admItemDrawer(id) });
+}
+// Punto de entrada para otros módulos (asistente, formularios de Gestión): abre el drawer del indicador
+function openCascadeItem(id) { if (IDX.cascade && IDX.cascade.get(id)) admOpenItem(id); }
+function admTaskList(list) {
+  const row = t => typeof taskRow === 'function' ? taskRow(t, { showProject: true }) :
+    '<button type="button" data-action="admin.openTask" data-id="' + esc(t.id) + '" class="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition hover:bg-zinc-100/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:bg-zinc-800/50">' +
+    avatar(t.resp, 'xs') + '<span class="min-w-0 flex-1 truncate text-sm text-zinc-800 dark:text-zinc-100">' + esc(t.nombre) + '</span>' + dueBadge(t) + '</button>';
+  return '<div class="space-y-0.5 rounded-xl border border-zinc-200 bg-white p-1.5 sm:p-2 dark:border-zinc-800 dark:bg-zinc-900">' + list.map(row).join('') + '</div>';
+}
+function admProjectRow(p) {
+  const P = PIL(p.pilar);
+  return '<button type="button" data-action="admin.openProject" data-id="' + esc(p.id) + '" class="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition hover:bg-zinc-100/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:bg-zinc-800/50">' +
+    '<span class="grid size-7 shrink-0 place-items-center rounded-md ' + (P ? P.tone.iconbox : tone('violet').iconbox) + '">' + icon('folder-kanban', 'size-3.5') + '</span>' +
+    '<span class="min-w-0 flex-1 truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">' + esc(p.nombre) + '</span>' +
+    (p.estado && p.estado !== 'Activo' ? badge(p.estado, 'zinc') : '') + avatar(p.resp, 'xs') + '</button>';
+}
+function admItemDrawer(id) {
+  const it = IDX.cascade.get(id);
+  if (!it) return null;
+  const meta = CLASE_META[it.clase] || CLASE_META.accion;
+  const g = it.padre ? IDX.cascade.get(it.padre) : null;
+  const list = (S.tasks || []).filter(t => t.cascade === id);
+  const projs = (S.projects || []).filter(p => p.cascade === id);
+  const pend = list.filter(t => t.estado !== 'Realizada').sort((a, b) => (a.fecha || '9999-99-99').localeCompare(b.fecha || '9999-99-99'));
+  const done = list.filter(t => t.estado === 'Realizada').sort((a, b) => (b.completada || '').localeCompare(a.completada || ''));
+  const sibs = admSiblings(it);
+  const idx = sibs.findIndex(x => x.id === id);
+  const sec = (title, ic, inner) => '<div class="mt-5 first:mt-0">' + sectionHeader({ title: title, icon: ic }) + inner + '</div>';
+
+  // §14.4: sin tarjetas de cifras ni conteos en los títulos; las listas ya lo dicen
+  let body = '';
+  if (g) {
+    body += '<p class="mb-5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm text-zinc-600 dark:text-zinc-300">' + icon('target', 'size-4 shrink-0 text-violet-500 dark:text-violet-400') +
+      '<span class="min-w-0 break-words font-medium text-zinc-900 dark:text-zinc-100">' + esc(g.nombre) + '</span>' + admEtqTag(g.etiqueta) + '</p>';
+  }
+  if (projs.length) {
+    body += sec(projs.length === 1 ? 'Proyecto' : 'Proyectos', 'folder-kanban',
+      '<div class="space-y-0.5 rounded-xl border border-zinc-200 bg-white p-1.5 sm:p-2 dark:border-zinc-800 dark:bg-zinc-900">' + projs.map(admProjectRow).join('') + '</div>');
+  }
+  body += sec('Pendientes', 'circle-dot', pend.length ? admTaskList(pend) : '<p class="px-1 text-sm text-zinc-500 dark:text-zinc-400">Sin pendientes.</p>');
+  if (done.length) body += sec('Realizadas', 'circle-check', admTaskList(done));
+
+  const footer = '<div class="mr-auto flex items-center gap-0.5">' +
+    iconBtn({ icon: 'arrow-up', action: 'cascade.move', data: { id: id, dir: 'up' }, title: 'Subir en el grupo', attrs: 'id="casd-up-' + esc(id) + '"' + (idx <= 0 ? ' disabled' : '') }) +
+    iconBtn({ icon: 'arrow-down', action: 'cascade.move', data: { id: id, dir: 'down' }, title: 'Bajar en el grupo', attrs: 'id="casd-dn-' + esc(id) + '"' + (idx < 0 || idx >= sibs.length - 1 ? ' disabled' : '') }) +
+    iconBtn({ icon: 'trash', action: 'cascade.delete', data: { id: id }, title: 'Eliminar indicador', variant: 'danger-ghost' }) + '</div>' +
+    btn({ label: 'Editar', icon: 'pencil', variant: 'secondary', action: 'cascade.edit', data: { id: id } }) +
+    btn({ label: 'Nueva tarea', icon: 'plus', variant: 'primary', action: 'cascade.newTask', data: { id: id } });
+
+  return {
+    title: it.nombre,
+    subtitle: pillarBadge(it.pilar) + badge(meta.label, meta.tone, meta.icon),
+    iconHtml: '<span class="grid size-10 shrink-0 place-items-center rounded-xl ' + tone(meta.tone).iconbox + '">' + icon(meta.icon, 'size-5') + '</span>',
+    body: body,
+    footer: footer,
+  };
+}
+
+/* ---------- Formularios (modales) ---------- */
+function admBindSave(el, submit) {
+  const b = el.querySelector('[data-adm-save]');
+  if (b) b.addEventListener('click', submit);
+  el.querySelectorAll('input[type="text"]').forEach(i => i.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); submit(); }
+  }));
+}
+function admSaving(el, on) {
+  const b = el.querySelector('[data-adm-save]');
+  if (!b) return;
+  b.disabled = on;
+  b.innerHTML = on ? icon('loader-circle', 'size-4 shrink-0 animate-spin') + '<span>Guardando…</span>' : icon('check', 'size-4 shrink-0') + '<span>Guardar</span>';
+  refreshIcons(b);
+}
+function admFormFooter() {
+  return btn({ label: 'Cancelar', variant: 'secondary', action: 'modal.close' }) +
+    btn({ label: 'Guardar', icon: 'check', variant: 'primary', attrs: 'data-adm-save="1"' });
+}
+
+function admGroupForm(id) {
+  const A = admState();
+  const g = id ? IDX.cascade.get(id) : null;
+  const etq = g ? String(g.etiqueta || '').trim() : 'Iniciativa';
+  const known = !etq || etq === '—' || ADM_ETIQUETAS.indexOf(etq) >= 0;
+  const selVal = known ? (etq === '—' ? '' : etq) : '__otra';
+  const pilar = g ? g.pilar : A.pilar;
+  const body = '<div class="space-y-4">' +
+    field({ name: 'nombre', label: 'Nombre del grupo', required: true, value: g ? g.nombre : '', placeholder: 'Ej: Valorización EDS', attrs: 'maxlength="200"' }) +
+    (g ? '' : selectField({ name: 'pilar', label: 'Pilar', value: pilar, options: S.pillars.map(p => ({ value: p.key, label: p.label })) })) +
+    selectField({
+      name: 'etiqueta', label: 'Etiqueta', value: selVal, placeholder: 'Sin etiqueta', attrs: 'data-change="cascade.etq"',
+      options: ADM_ETIQUETAS.map(e => ({ value: e, label: e })).concat([{ value: '__otra', label: 'Otra…' }]),
+    }) +
+    '<div data-etq-other class="' + (selVal === '__otra' ? '' : 'hidden') + '">' +
+    field({ name: 'etiquetaOtra', label: 'Otra etiqueta', value: known ? '' : etq, placeholder: 'Escribe la etiqueta', attrs: 'maxlength="80"' }) + '</div>' +
+    '</div>';
+  openModal({
+    title: g ? 'Editar grupo' : 'Nuevo grupo',
+    subtitle: esc('Objetivo o iniciativa de Cascade'),
+    iconHtml: '<span class="grid size-9 shrink-0 place-items-center rounded-lg bg-violet-50 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300">' + icon('target', 'size-4') + '</span>',
+    size: 'md', body: body, footer: admFormFooter(),
+    onMount: (el, close) => {
+      let busy = false;
+      const submit = () => {
+        if (busy) return;
+        const f = readForm(el.querySelector('[data-modal-body]'));
+        const nombre = String(f.nombre || '').trim();
+        if (!nombre) { toast('El nombre es obligatorio', 'error'); const n = el.querySelector('[name="nombre"]'); if (n) n.focus(); return; }
+        const etiqueta = f.etiqueta === '__otra' ? String(f.etiquetaOtra || '').trim() : String(f.etiqueta || '');
+        const pil = g ? g.pilar : (f.pilar || A.pilar);
+        const ent = g ? admEnt(g, { nombre: nombre, etiqueta: etiqueta }) :
+          { tipo: 'Cascade', pilar: pil, padre: '', nombre: nombre, etiqueta: etiqueta, clase: 'grupo', orden: admNextOrden(IDX.cascadeGroups[pil] || []) };
+        busy = true; admSaving(el, true);
+        mutate('gSave', [ent], { success: g ? 'Grupo actualizado' : 'Grupo creado' }).then(b => {
+          busy = false;
+          if (!b) { admSaving(el, false); return; }
+          close();
+          if (!g) {
+            const st = admState();
+            st.pilar = pil;
+            if (b.lastId) { st.open[b.lastId] = true; st.justOpened = b.lastId; }
+            admRerenderIf('cascade');
+          }
+        });
+      };
+      admBindSave(el, submit);
+    },
+  });
+}
+
+function admItemForm(o) {
+  const it = o.id ? IDX.cascade.get(o.id) : null;
+  const padre = it ? it.padre : o.padre;
+  const g = IDX.cascade.get(padre);
+  if (!g) { toast('No se encontró el grupo', 'error'); return; }
+  const groups = IDX.cascadeGroups[g.pilar] || [];
+  const clase = it ? (it.clase || 'accion') : 'accion';
+  const tiles = '<fieldset><legend class="' + CX.label + '">Tipo <span class="text-red-500">*</span></legend>' +
+    '<div class="grid grid-cols-2 gap-2 sm:grid-cols-4">' + ADM_CLASES.map(k => {
+      const m = CLASE_META[k];
+      return '<label class="relative block cursor-pointer"><input type="radio" name="clase" value="' + k + '" class="peer sr-only"' + (k === clase ? ' checked' : '') + '>' +
+        '<span class="flex h-full flex-col gap-1.5 rounded-lg border border-zinc-200 bg-white p-2.5 transition hover:border-zinc-300 peer-checked:border-indigo-500 peer-checked:ring-1 peer-checked:ring-indigo-500 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-500/60 dark:border-zinc-700 dark:bg-zinc-800/50 dark:hover:border-zinc-600 dark:peer-checked:border-indigo-400 dark:peer-checked:ring-indigo-400">' +
+        '<span class="grid size-7 place-items-center rounded-md ' + tone(m.tone).iconbox + '">' + icon(m.icon, 'size-3.5') + '</span>' +
+        '<span class="text-xs font-semibold text-zinc-900 dark:text-zinc-100">' + esc(m.label) + '</span>' +
+        '<span class="text-[11px] leading-snug text-zinc-500 dark:text-zinc-400">' + esc(ADM_CLASE_DESC[k]) + '</span></span></label>';
+    }).join('') + '</div></fieldset>';
+  const body = '<div class="space-y-4">' +
+    field({ name: 'nombre', label: 'Nombre del indicador', required: true, value: it ? it.nombre : '', placeholder: 'Ej: Tasa Desvío COPEC', attrs: 'maxlength="200"' }) +
+    tiles +
+    selectField({ name: 'padre', label: 'Grupo', value: g.id, options: groups.map(x => ({ value: x.id, label: x.nombre })) }) +
+    '</div>';
+  const p = PIL(g.pilar);
+  openModal({
+    title: it ? 'Editar indicador' : 'Agregar indicador',
+    subtitle: p ? esc(p.label) : '',
+    iconHtml: '<span class="grid size-9 shrink-0 place-items-center rounded-lg ' + tone((CLASE_META[clase] || CLASE_META.accion).tone).iconbox + '">' + icon((CLASE_META[clase] || CLASE_META.accion).icon, 'size-4') + '</span>',
+    size: 'md', body: body, footer: admFormFooter(),
+    onMount: (el, close) => {
+      let busy = false;
+      const submit = () => {
+        if (busy) return;
+        const f = readForm(el.querySelector('[data-modal-body]'));
+        const nombre = String(f.nombre || '').trim();
+        if (!nombre) { toast('El nombre es obligatorio', 'error'); const n = el.querySelector('[name="nombre"]'); if (n) n.focus(); return; }
+        const ng = IDX.cascade.get(f.padre) || g;
+        const kids = IDX.cascadeChildren.get(ng.id) || [];
+        const orden = it && it.padre === ng.id ? (Number(it.orden) || 0) : admNextOrden(kids);
+        const fields = { pilar: ng.pilar, padre: ng.id, nombre: nombre, clase: ADM_CLASES.indexOf(f.clase) >= 0 ? f.clase : 'accion', orden: orden };
+        const ent = it ? admEnt(it, fields) : Object.assign({ tipo: 'Cascade', etiqueta: '' }, fields);
+        busy = true; admSaving(el, true);
+        mutate('gSave', [ent], { success: it ? 'Indicador actualizado' : 'Indicador agregado' }).then(b => {
+          busy = false;
+          if (!b) { admSaving(el, false); return; }
+          close();
+          const st = admState();
+          st.open[ng.id] = true;
+          admRerenderIf('cascade');
+        });
+      };
+      admBindSave(el, submit);
+    },
+  });
+}
+
+/* ---------- Reordenar (intercambia 'orden' con el vecino) ---------- */
+function admMove(id, dir) {
+  const A = admState();
+  if (A.busy.move) return;
+  const it = IDX.cascade.get(id); if (!it) return;
+  const sibs = admSiblings(it);
+  const i = sibs.findIndex(x => x.id === id), j = dir === 'up' ? i - 1 : i + 1;
+  if (i < 0 || j < 0 || j >= sibs.length) return;
+  const ords = sibs.map(x => Number(x.orden) || 0);
+  const distinct = new Set(ords).size === ords.length;
+  let saves;
+  if (distinct) {
+    saves = [admEnt(sibs[i], { orden: ords[j] }), admEnt(sibs[j], { orden: ords[i] })];
+  } else {
+    // Órdenes repetidos: se renumera el grupo completo (sólo una vez)
+    const order = sibs.slice(); const tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+    saves = order.map((x, k) => ({ x: x, o: (k + 1) * 10 })).filter(z => (Number(z.x.orden) || 0) !== z.o).map(z => admEnt(z.x, { orden: z.o }));
+  }
+  A.busy.move = true;
+  // Si se usó el teclado, se mantiene el foco en las flechas del mismo indicador
+  const ae = document.activeElement;
+  const pre = ae && ae.id && /^casd?-(up|dn)-/.test(ae.id) ? ae.id.slice(0, ae.id.indexOf('-') + 1) : '';
+  const step = k => {
+    if (k >= saves.length) return Promise.resolve(true);
+    const last = k === saves.length - 1;
+    return mutate('gSave', [saves[k]], { silent: !last, success: 'Orden actualizado' }).then(b => b ? step(k + 1) : false);
+  };
+  step(0).then(ok => {
+    if (!ok || !pre) return;
+    const cur = document.activeElement;
+    if (cur && cur !== document.body && cur.id) return;
+    const a = document.getElementById(pre + (dir === 'up' ? 'up-' : 'dn-') + id), b = document.getElementById(pre + (dir === 'up' ? 'dn-' : 'up-') + id);
+    const el = a && !a.disabled ? a : (b && !b.disabled ? b : null);
+    if (el) el.focus({ preventScroll: true });
+  }).finally(() => { A.busy.move = false; });
+}
+
+/* ---------- Eliminar ---------- */
+function admDelete(id) {
+  const it = IDX.cascade.get(id); if (!it) return;
+  if (!it.padre) {
+    const n = (IDX.cascadeChildren.get(id) || []).length;
+    if (n) { toast('Elimina primero sus indicadores: este grupo tiene ' + plural(n, 'indicador', 'indicadores') + '.', 'error'); return; }
+  }
+  const nT = (S.tasks || []).filter(t => t.cascade === id).length;
+  const nP = (S.projects || []).filter(p => p.cascade === id).length;
+  const linked = [nT ? plural(nT, 'tarea', 'tareas') : '', nP ? plural(nP, 'proyecto', 'proyectos') : ''].filter(Boolean).join(' y ');
+  confirmDialog({
+    title: it.padre ? '¿Eliminar indicador?' : '¿Eliminar grupo?',
+    message: '«' + it.nombre + '» se quitará del catálogo. ' + (linked ? 'Quedarán sin indicador: ' + linked + '. ' : '') + 'Esta acción no se puede deshacer.',
+    confirmLabel: 'Eliminar', danger: true,
+  }).then(ok => {
+    if (!ok) return;
+    mutate('gDelete', [id], { success: it.padre ? 'Indicador eliminado' : 'Grupo eliminado' });
+  });
+}
+
+/* ---------- Acciones Cascade ---------- */
+action('cascade.pilar', d => { const A = admState(); A.pilar = d.value; rerender(); });
+action('cascade.q', (d, el) => { const A = admState(); A.casQ = el.value; admLater('casq', () => admRerenderIf('cascade'), 150); });
+action('cascade.toggle', d => { const A = admState(); const open = admIsOpen(A, d.id); A.open[d.id] = !open; A.justOpened = open ? null : d.id; rerender(); });
+action('cascade.expandAll', () => { const A = admState(); (IDX.cascadeGroups[A.pilar] || []).forEach(g => { A.open[g.id] = true; }); rerender(); });
+action('cascade.collapseAll', () => { const A = admState(); (IDX.cascadeGroups[A.pilar] || []).forEach(g => { A.open[g.id] = false; }); rerender(); });
+action('cascade.newGroup', () => admGroupForm(null));
+action('cascade.addItem', d => admItemForm({ padre: d.padre }));
+action('cascade.edit', d => { const it = IDX.cascade.get(d.id); if (!it) return; if (it.padre) admItemForm({ id: it.id }); else admGroupForm(it.id); });
+action('cascade.delete', d => admDelete(d.id));
+action('cascade.move', d => admMove(d.id, d.dir));
+action('cascade.openItem', d => admOpenItem(d.id));
+action('cascade.newTask', d => {
+  const it = IDX.cascade.get(d.id); if (!it) return;
+  if (typeof openTaskForm === 'function') openTaskForm({ pilar: it.pilar, cascade: it.id });
+  else toast('El formulario de tareas no está disponible', 'error');
+});
+action('cascade.etq', (d, el) => {
+  const root = el.closest('[data-modal-body]'); if (!root) return;
+  const box = root.querySelector('[data-etq-other]'); if (!box) return;
+  const on = el.value === '__otra';
+  box.classList.toggle('hidden', !on);
+  if (on) { const i = box.querySelector('input'); if (i) i.focus(); }
+});
+action('admin.openTask', d => { if (typeof openTask === 'function') openTask(d.id); });
+action('admin.openProject', d => { if (typeof openProject === 'function') openProject(d.id); });
+
+registerView('cascade', { title: 'Indicadores Cascade', render: admCascadeView });
+
+/* =====================================================================
+   2) Historial
+   ===================================================================== */
+function admKind(accion) {
+  const a = normTxt(accion);
+  if (/notif|correo|mail|recordatorio|aviso|digest/.test(a)) return 'notif';
+  if (/elimin|borr|quit|remov/.test(a)) return 'delete';
+  if (/coment/.test(a)) return 'comment';
+  if (/complet|realiz|cerr|termin|finaliz/.test(a)) return 'complete';
+  if (/crea|agreg|nuev|alta|anad/.test(a)) return 'create';
+  if (/edit|actualiz|modific|cambi|mov|reabr|reorden|vincul|recalc|instal|config|guard|orden/.test(a)) return 'edit';
+  return 'other';
+}
+function admLoadHist(silent) {
+  const A = admState();
+  if (A.histLoading) return;
+  A.histLoading = true;
+  if (!silent) A.histErr = '';
+  run('getHistory', 300).then(rows => {
+    A.hist = (Array.isArray(rows) ? rows : []).map(r => Object.assign({}, r, { _k: admKind(r.accion) }));
+    A.histAt = Date.now(); A.histErr = '';
+  }).catch(e => {
+    if (A.hist == null) A.histErr = errMsg(e);
+    toast(errMsg(e), 'error');
+  }).finally(() => { A.histLoading = false; admRerenderIf('history'); });
+}
+function admUserLabel(u, k) {
+  if (u && u !== 'desconocido') return userName(u);
+  return k === 'notif' ? 'Sistema' : 'Usuario no identificado';
+}
+function admUserAvatar(u, k) {
+  if (u && u !== 'desconocido') return avatar(u, 'xs');
+  return '<span class="inline-grid size-5 shrink-0 place-items-center rounded-full bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">' + icon(k === 'notif' ? 'bot' : 'user', 'size-3') + '</span>';
+}
+function admHistSkeleton() {
+  let h = '';
+  for (let i = 0; i < 7; i++) {
+    h += '<div class="flex gap-3"><div class="skeleton size-8 shrink-0 rounded-full"></div><div class="flex-1 space-y-2 pt-1">' +
+      '<div class="skeleton h-3.5 rounded" style="width:' + (28 + (i * 13) % 30) + '%"></div><div class="skeleton h-3 rounded" style="width:' + (45 + (i * 17) % 40) + '%"></div></div></div>';
+  }
+  return '<div class="mt-6"><div class="skeleton mb-3 h-3 w-16 rounded"></div>' + card('<div class="space-y-6 p-4 sm:p-5">' + h + '</div>') + '</div>';
+}
+function admHistToolbar(A, base, disabled) {
+  const counts = { all: base.length };
+  base.forEach(r => { counts[r._k] = (counts[r._k] || 0) + 1; });
+  const extra = [];
+  base.concat(A.hist || []).forEach(r => { if (r.usuario && !S.users.some(u => u.email === r.usuario) && extra.indexOf(r.usuario) < 0) extra.push(r.usuario); });
+  const uopts = [{ value: 'all', label: 'Todas las personas' }]
+    .concat(S.users.map(u => ({ value: u.email, label: u.name })))
+    .concat(extra.map(e => ({ value: e, label: e === 'desconocido' ? 'No identificado' : e })));
+  // Sin conteos por tipo (§14.4); un tipo sin movimientos con los filtros actuales no se ofrece
+  const types = ['all', 'create', 'edit', 'complete', 'comment', 'delete', 'notif'].filter(k => k === 'all' || k === A.histType || disabled || counts[k]).map(k => ({
+    value: k, label: k === 'all' ? 'Todo' : ADM_KINDS[k].label, icon: k === 'all' ? null : ADM_KINDS[k].icon,
+  }));
+  return '<div class="space-y-3">' +
+    '<div class="flex flex-col gap-2 sm:flex-row sm:items-center">' +
+    searchInput({ id: 'q-hist', input: 'admin.histQ', value: A.histQ, placeholder: 'Buscar en el historial…', cls: 'w-full sm:w-80' }) +
+    selectField({ name: 'histUser', value: A.histUser, options: uopts, cls: 'w-full sm:w-56', attrs: 'data-change="admin.histUser" aria-label="Filtrar por persona"' }) +
+    '</div>' +
+    '<div class="max-w-full overflow-x-auto">' + segmented({ value: A.histType, action: 'admin.histType', options: types }) + '</div>' +
+    '</div>';
+}
+function admHistItem(r, last) {
+  const k = ADM_KINDS[r._k] || ADM_KINDS.other;
+  const d = new Date(r.fecha);
+  const ok = !isNaN(d.getTime());
+  const det = String(r.detalle || '');
+  const long = det.length > 160 || det.split('\n').length > 2;
+  return '<li class="relative flex gap-3 ' + (last ? '' : 'pb-6') + '" data-hist-item>' +
+    (last ? '' : '<span aria-hidden="true" class="absolute bottom-0 left-4 top-9 w-px -translate-x-1/2 bg-zinc-200 dark:bg-zinc-800"></span>') +
+    '<span class="relative grid size-8 shrink-0 place-items-center rounded-full ring-4 ring-white dark:ring-zinc-900 ' + tone(k.tone).iconbox + '" title="' + esc(k.label) + '">' + icon(k.icon, 'size-4') + '</span>' +
+    '<div class="min-w-0 flex-1">' +
+    '<div class="flex items-start gap-2">' +
+    '<div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 pt-1">' +
+    '<span class="inline-flex min-w-0 items-center gap-1.5">' + admUserAvatar(r.usuario, r._k) +
+    '<span class="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">' + esc(admUserLabel(r.usuario, r._k)) + '</span></span>' +
+    '<span class="inline-flex min-w-0 max-w-full items-center rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ' + tone(k.tone).soft + '"><span class="truncate">' + esc(r.accion || k.label) + '</span></span></div>' +
+    '<time class="shrink-0 pt-1 text-xs tabular-nums text-zinc-500 dark:text-zinc-400" title="' + esc(ok ? fmtDateTime(d) : r.fecha) + '">' + (ok ? pad2(d.getHours()) + ':' + pad2(d.getMinutes()) : '') + '</time></div>' +
+    (r.entidad ? '<p class="mt-1 break-words text-sm font-semibold text-zinc-900 dark:text-white">' + esc(r.entidad) + '</p>' : '') +
+    (det ? '<p data-detail class="mt-0.5 line-clamp-2 whitespace-pre-wrap break-words text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">' + linkify(det) + '</p>' +
+      (long ? '<button type="button" data-action="admin.histMore" aria-expanded="false" class="mt-1 rounded text-xs font-medium text-indigo-600 hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400">Ver más</button>' : '') : '') +
+    '</div></li>';
+}
+function admHistoryView() {
+  const A = admState();
+  if (!admIsAdmin()) {
+    return pageHeader({ title: 'Historial', icon: 'rotate-ccw-clock', tone: 'zinc' }) +
+      card(emptyState({ icon: 'lock', title: 'El historial lo revisa la administración' }));
+  }
+  const right = A.histLoading ? admSpin('Cargando…') : btn({ label: 'Recargar', icon: 'refresh-cw', variant: 'secondary', action: 'admin.histReload', title: 'Recargar historial' });
+  const header = pageHeader({ title: 'Historial', icon: 'rotate-ccw-clock', tone: 'zinc', right: right });
+  if (A.hist == null) {
+    if (A.histErr && !A.histLoading) {
+      return header + card(emptyState({ icon: 'cloud-off', title: 'No se pudo cargar el historial', text: A.histErr, actionHtml: btn({ label: 'Reintentar', icon: 'refresh-cw', variant: 'primary', action: 'admin.histReload' }) }));
+    }
+    return header + admHistToolbar(A, [], true) + admHistSkeleton();
+  }
+  const q = normTxt(A.histQ);
+  const base = A.hist.filter(r => (A.histUser === 'all' || r.usuario === A.histUser) &&
+    (!q || normTxt([r.accion, r.entidad, r.detalle, admUserLabel(r.usuario, r._k), r.usuario].join(' ')).indexOf(q) >= 0));
+  const list = A.histType === 'all' ? base : base.filter(r => r._k === A.histType);
+  let out = header + admHistToolbar(A, base, false);
+
+  if (!A.hist.length) {
+    return out + '<div class="mt-6">' + card(emptyState({ icon: 'rotate-ccw-clock', title: 'Aún no hay movimientos' })) + '</div>';
+  }
+  if (!list.length) {
+    return out + '<div class="mt-6">' + card(emptyState({ icon: 'search', title: 'Sin resultados', actionHtml: btn({ label: 'Limpiar filtros', icon: 'x', variant: 'secondary', action: 'admin.histClear' }) })) + '</div>';
+  }
+
+  const shown = list.slice(0, A.histShow);
+  const days = [];
+  let cur = null;
+  shown.forEach(r => {
+    const d = new Date(r.fecha);
+    const key = isNaN(d.getTime()) ? '' : ymd(d);
+    if (!cur || cur.key !== key) { cur = { key: key, rows: [] }; days.push(cur); }
+    cur.rows.push(r);
+  });
+  const today = todayStr(), yest = addDays(today, -1);
+  out += '<div class="mt-6 space-y-6">' + days.map(day => {
+    const label = !day.key ? 'Sin fecha' : day.key === today ? 'Hoy' : day.key === yest ? 'Ayer' : fmtDate(day.key);
+    const pd = parseYmd(day.key);
+    const wd = pd && day.key !== today && day.key !== yest ? ADM_DIAS[pd.getDay()] : '';
+    return '<section>' +
+      '<div class="sticky top-0 z-10 -mx-1 mb-2 flex items-center gap-3 bg-zinc-50/90 px-1 py-2 backdrop-blur dark:bg-zinc-950/85">' +
+      '<h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-700 dark:text-zinc-300">' + esc(label) + '</h2>' +
+      (wd ? '<span class="text-xs text-zinc-400 dark:text-zinc-500">' + esc(wd) + '</span>' : '') +
+      '<span class="h-px flex-1 bg-zinc-200 dark:bg-zinc-800"></span></div>' +
+      card('<ul class="p-4 sm:p-5">' + day.rows.map((r, i) => admHistItem(r, i === day.rows.length - 1)).join('') + '</ul>') +
+      '</section>';
+  }).join('') + '</div>';
+
+  if (list.length > shown.length) {
+    out += '<div class="mt-6 flex justify-center">' + btn({ label: 'Mostrar más (' + (list.length - shown.length) + ')', icon: 'chevron-down', variant: 'secondary', action: 'admin.histShowMore' }) + '</div>';
+  } else {
+    out += '<p class="mt-6 text-center text-xs text-zinc-400 dark:text-zinc-500">' + esc('El registro completo está en la pestaña «Historial» de la planilla.') + '</p>';
+  }
+  return out;
+}
+function admHistoryMount(root, params, ctx) {
+  const A = admState();
+  if (!admIsAdmin()) return;
+  // "Ver más" sólo si el detalle realmente quedó recortado
+  root.querySelectorAll('[data-hist-item]').forEach(li => {
+    const p = li.querySelector('[data-detail]'), b = li.querySelector('[data-action="admin.histMore"]');
+    if (p && b && p.classList.contains('line-clamp-2') && p.scrollHeight <= p.clientHeight + 1) b.remove();
+  });
+  if (A.histLoading) return;
+  if (A.hist == null) { if (!A.histErr) admLoadHist(false); return; }
+  // Al volver a la vista, refresca en segundo plano si los datos tienen más de 1 minuto
+  if (ctx && ctx.animate && Date.now() - (A.histAt || 0) > 60000) admLoadHist(true);
+}
+
+action('admin.histReload', () => { const A = admState(); A.histErr = ''; admLoadHist(A.hist != null); rerender(); });
+action('admin.histQ', (d, el) => { const A = admState(); A.histQ = el.value; A.histShow = ADM_HIST_PAGE; admLater('histq', () => admRerenderIf('history'), 150); });
+action('admin.histUser', (d, el) => { const A = admState(); A.histUser = el.value || 'all'; A.histShow = ADM_HIST_PAGE; rerender(); });
+action('admin.histType', d => { const A = admState(); A.histType = d.value || 'all'; A.histShow = ADM_HIST_PAGE; rerender(); });
+action('admin.histShowMore', () => { const A = admState(); A.histShow += ADM_HIST_PAGE; rerender(); });
+action('admin.histClear', () => { const A = admState(); A.histQ = ''; A.histUser = 'all'; A.histType = 'all'; A.histShow = ADM_HIST_PAGE; rerender(); });
+action('admin.histMore', (d, el) => {
+  const item = el.closest('[data-hist-item]'); if (!item) return;
+  const p = item.querySelector('[data-detail]'); if (!p) return;
+  const open = p.classList.toggle('line-clamp-2') === false;
+  el.textContent = open ? 'Ver menos' : 'Ver más';
+  el.setAttribute('aria-expanded', String(open));
+});
+
+registerView('history', { title: 'Historial', render: admHistoryView, mount: admHistoryMount });
+
+/* =====================================================================
+   3) Ajustes
+   ===================================================================== */
+function admLoadStatus(force) {
+  const A = admState();
+  if (A.statusLoading) return;
+  if (A.status && !force) return;
+  A.statusLoading = true; A.statusErr = '';
+  run('getAdminStatus').then(st => { A.status = st || {}; A.statusAt = Date.now(); })
+    .catch(e => { A.statusErr = errMsg(e); })
+    .finally(() => { A.statusLoading = false; admRerenderIf('settings'); });
+}
+function admSetCard(o) {
+  return '<section class="' + CX.card + ' overflow-hidden" aria-labelledby="set-' + esc(o.key) + '">' +
+    '<div class="flex items-start gap-3 px-5 pt-5">' + admIconBox(o.icon, o.tone || 'zinc') +
+    '<div class="min-w-0 flex-1"><h2 id="set-' + esc(o.key) + '" class="text-sm font-semibold text-zinc-900 dark:text-white">' + esc(o.title) + '</h2>' +
+    (o.desc ? '<p class="mt-0.5 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">' + o.desc + '</p>' : '') + '</div>' +
+    (o.right ? '<div class="shrink-0">' + o.right + '</div>' : '') + '</div>' +
+    (o.body ? '<div class="px-5 pb-5 pt-4">' + o.body + '</div>' : '<div class="pb-5"></div>') +
+    (o.footer ? '<div class="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-100 bg-zinc-50/70 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-900/60">' + o.footer + '</div>' : '') +
+    '</section>';
+}
+function admDl(rows) {
+  return '<dl class="divide-y divide-zinc-100 text-sm dark:divide-zinc-800">' + rows.map(r =>
+    '<div class="flex items-center justify-between gap-4 py-2.5 first:pt-0 last:pb-0"><dt class="shrink-0 text-zinc-500 dark:text-zinc-400">' + esc(r[0]) + '</dt>' +
+    '<dd class="flex min-w-0 items-center justify-end gap-1.5 text-right font-medium text-zinc-900 dark:text-zinc-100">' + r[1] + '</dd></div>').join('') + '</dl>';
+}
+function admStatusPill(on, onLabel, offLabel) {
+  return on ? badge(onLabel, 'emerald', 'circle-check') : badge(offLabel, 'amber', 'triangle-alert');
+}
+
+function admProfileCard() {
+  const real = S.me && S.me.email && S.me.email !== 'desconocido' ? S.me.email : '';
+  const picked = real ? '' : LS.get('whoami', '') || '';
+  const shown = real || picked;
+  let body = '<div class="flex items-center gap-4">' + avatar(shown, 'lg') +
+    '<div class="min-w-0 flex-1"><p class="truncate text-base font-semibold text-zinc-900 dark:text-white">' + esc(shown ? userName(shown) : 'Usuario no identificado') + '</p>' +
+    '<p class="truncate text-sm text-zinc-500 dark:text-zinc-400">' + esc(shown || 'Correo no detectado') + '</p></div>' +
+    (S.me && S.me.admin ? badge('Administrador', 'indigo', 'shield-check') : badge('Equipo', 'zinc', 'user')) + '</div>';
+  if (!real) {
+    body += '<div class="mt-4 rounded-lg bg-amber-50 p-3 ring-1 ring-inset ring-amber-600/15 dark:bg-amber-500/10 dark:ring-amber-400/20">' +
+      '<p class="flex gap-2 text-xs leading-relaxed text-amber-900 dark:text-amber-200">' + icon('triangle-alert', 'mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400') +
+      '<span class="min-w-0">Google no compartió tu correo: elige quién eres (se guarda sólo en este navegador).</span></p>' +
+      '<div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">' +
+      selectField({ name: 'whoami', label: '¿Quién eres?', value: picked, placeholder: 'Elige tu nombre…', cls: 'flex-1', attrs: 'data-change="admin.whoami"', options: S.users.map(u => ({ value: u.email, label: u.name + ' · ' + u.email })) }) +
+      (picked ? btn({ label: 'Olvidar', icon: 'x', variant: 'ghost', action: 'admin.forgetWhoami', title: 'Olvidar identidad elegida' }) : '') +
+      '</div></div>';
+  }
+  return admSetCard({ key: 'perfil', icon: 'user-round', tone: 'indigo', title: 'Tu perfil', body: body });
+}
+
+function admThemeCard() {
+  const pref = LS.get('theme', 'system');
+  const body = segmented({
+    value: pref, action: 'admin.theme',
+    options: [{ value: 'system', label: 'Sistema', icon: 'monitor' }, { value: 'light', label: 'Claro', icon: 'sun' }, { value: 'dark', label: 'Oscuro', icon: 'moon' }],
+  });
+  return admSetCard({ key: 'tema', icon: 'palette', tone: 'violet', title: 'Apariencia', body: body });
+}
+
+function admNotifCard() {
+  const A = admState();
+  const st = A.status;
+  const admin = admIsAdmin();
+  // El estado va arriba a la derecha; el cuerpo es una sola línea (§14.4)
+  let status;
+  if (st) status = admStatusPill(!!st.triggerInstalled, 'Activo', 'No instalado');
+  else if (A.statusErr) status = iconBtn({ icon: 'refresh-cw', action: 'admin.statusReload', title: 'No se pudo leer el estado · Reintentar' });
+  else status = '<div class="skeleton h-5 w-20 rounded-md"></div>';
+  let body = '<p class="text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">' +
+    esc('Un solo correo cuando una tarea vence sin estar lista (~08:00 del día siguiente). Se apaga en cada tarea.') + '</p>';
+  if (st && !st.triggerInstalled && !admin) {
+    body += '<p class="mt-2 flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">' + icon('info', 'mt-0.5 size-3.5 shrink-0') + 'Pídele a un administrador que instale las notificaciones.</p>';
+  }
+  const footer = (A.busy.test ? admSpin('Enviando…') : btn({ label: 'Enviarme una prueba', icon: 'send', variant: 'secondary', action: 'admin.testDigest' })) +
+    (admin ? (A.busy.install ? admSpin('Instalando…') : btn({ label: 'Instalar / reparar', icon: 'bell-ring', variant: 'primary', action: 'admin.installTrigger', title: 'Instalar / reparar notificaciones' })) : '');
+  return admSetCard({ key: 'notif', icon: 'bell', tone: 'amber', title: 'Avisos por correo', right: status, body: body, footer: footer });
+}
+
+function admCode(t) {
+  return '<code class="break-words rounded bg-zinc-100 px-1 py-0.5 font-mono text-[11px] text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200">' + esc(t) + '</code>';
+}
+// Disclosure cerrado por defecto (mismo estilo en todas las tarjetas de Ajustes)
+function admDetails(o) {
+  return '<details class="group rounded-lg border border-zinc-200 dark:border-zinc-800 ' + (o.cls || '') + '"' + (o.open ? ' open' : '') + '>' +
+    '<summary class="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-800 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-100 dark:hover:bg-zinc-800/50 [&::-webkit-details-marker]:hidden">' +
+    icon(o.icon || 'info', 'size-4 shrink-0 text-zinc-400') + '<span class="min-w-0 flex-1">' + esc(o.summary) + '</span>' +
+    '<span class="text-zinc-400 transition-transform group-open:rotate-90">' + icon('chevron-right', 'size-4') + '</span></summary>' +
+    '<div class="border-t border-zinc-200 px-3 py-3 dark:border-zinc-800">' + o.body + '</div></details>';
+}
+
+// IA pospuesta: tarjeta discreta, con los pasos y la nota de privacidad plegados
+function admGeminiCard() {
+  const A = admState();
+  const st = A.status;
+  const enabled = st ? !!st.geminiEnabled : !!(S.config && S.config.geminiEnabled);
+  const model = st ? (st.model || '') : '';
+  const code = admCode;
+  const studio = safeUrl('https://aistudio.google.com/apikey');
+  const steps = [
+    'Crea una API key en <a href="' + esc(studio) + '" target="_blank" rel="noopener noreferrer" class="font-medium text-indigo-600 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-500 dark:text-indigo-400 dark:decoration-indigo-500/40">Google AI Studio</a>.',
+    'En la planilla abre <b class="font-medium text-zinc-900 dark:text-zinc-100">Extensiones → Apps Script</b>.',
+    'En el editor entra a <b class="font-medium text-zinc-900 dark:text-zinc-100">Configuración del proyecto</b> (ícono de engranaje).',
+    'En <b class="font-medium text-zinc-900 dark:text-zinc-100">Propiedades del script</b> agrega ' + code('GEMINI_API_KEY') + ' con la clave.',
+    'Opcional: agrega ' + code('GEMINI_MODEL') + ' para usar otro modelo' + (model ? ' (actual: ' + esc(model) + ')' : '') + '.',
+    'Recarga esta página.',
+  ];
+  const stepsHtml = '<ol class="space-y-2.5">' + steps.map((s, i) => '<li class="flex gap-3 text-sm text-zinc-600 dark:text-zinc-300">' +
+    '<span class="grid size-5 shrink-0 place-items-center rounded-full bg-zinc-100 text-[11px] font-semibold tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">' + (i + 1) + '</span>' +
+    '<span class="min-w-0 leading-relaxed">' + s + '</span></li>').join('') + '</ol>';
+
+  const privacy = '<div class="mt-4 flex gap-2.5 rounded-lg bg-sky-50 p-3 text-xs leading-relaxed text-sky-900 ring-1 ring-inset ring-sky-600/15 dark:bg-sky-500/10 dark:text-sky-200 dark:ring-sky-400/20">' +
+    icon('shield-check', 'mt-0.5 size-4 shrink-0 text-sky-600 dark:text-sky-400') +
+    '<p class="min-w-0"><b class="font-semibold">Privacidad.</b> En el nivel gratuito Google puede usar las preguntas para mejorar sus productos (mejor una clave de un proyecto con facturación). La clave queda sólo en el servidor.</p></div>';
+  const dot = '<span class="mr-1.5 inline-block size-1.5 rounded-full align-middle ' + (enabled ? 'bg-emerald-500' : 'bg-zinc-400 dark:bg-zinc-500') + '" aria-hidden="true"></span>';
+  const status = enabled ? 'Activado' + (model ? ' · ' + model : '') + ' — responde sólo con datos de la app' : 'Desactivado — el buscador funciona como directorio sin IA';
+  const body = admDetails({
+    icon: 'key-round', summary: enabled ? 'Cómo cambiar la clave o el modelo' : 'Cómo activarlo más adelante',
+    body: stepsHtml + privacy,
+  });
+  return admSetCard({
+    key: 'gemini', icon: 'sparkles', tone: enabled ? 'indigo' : 'zinc', title: 'Asistente Gemini (opcional)',
+    desc: dot + esc(status), body: body,
+  });
+}
+
+// Pestañas «Cuadre AAAA» omitidas por encabezados incompletos (bundle.config.warnings: 'Se omitió la pestaña "X": …')
+function admSkippedTabs() {
+  const out = [];
+  ((S.config && S.config.warnings) || []).forEach(w => {
+    const m = String(w || '').match(/^Se omitió la pestaña "([^"]+)"/);
+    if (m && out.indexOf(m[1]) < 0) out.push(m[1]);
+  });
+  return out;
+}
+
+function admYearsCard() {
+  const years = (S.years || []).slice().sort((a, b) => b - a);
+  const rows = years.map(y => {
+    const lines = budgetLines(y);
+    const pf = lines.reduce((a, l) => a + (Number(l.pf) || 0), 0);
+    return '<li class="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">' +
+      '<span class="grid size-9 shrink-0 place-items-center rounded-lg bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">' + icon('file-spreadsheet', 'size-4') + '</span>' +
+      '<div class="min-w-0 flex-1"><p class="flex flex-wrap items-center gap-1.5 text-sm font-semibold tabular-nums text-zinc-900 dark:text-white">Cuadre ' + y +
+      (y === S.year ? badge('Seleccionado', 'indigo') : '') + '</p>' +
+      '<p class="truncate text-xs text-zinc-500 dark:text-zinc-400">' + esc(plural(lines.length, 'línea', 'líneas') + (pf ? ' · ' + fmtCompact(pf) + ' proyectado' : '')) + '</p></div>' +
+      (y === S.year ? '' : btn({ label: 'Ver', size: 'sm', variant: 'ghost', icon: 'arrow-right', action: 'admin.gotoYear', data: { year: y }, title: 'Ver presupuesto ' + y })) + '</li>';
+  }).join('');
+  // Pestañas omitidas por el servidor: el detalle ya está en el aviso de arriba (warningsBanner); aquí sólo qué hacer
+  const skipped = admSkippedTabs();
+  const one = skipped.length === 1;
+  const skippedRows = skipped.map(name => '<li class="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">' +
+    '<span class="grid size-9 shrink-0 place-items-center rounded-lg ' + tone('amber').iconbox + '">' + icon('file-warning', 'size-4') + '</span>' +
+    '<div class="min-w-0 flex-1"><p class="flex flex-wrap items-center gap-1.5 text-sm font-semibold text-zinc-900 dark:text-white"><span class="min-w-0 truncate">' + esc(name) + '</span>' + badge('Omitida', 'amber') + '</p>' +
+    '<p class="text-xs text-zinc-500 dark:text-zinc-400">Encabezados incompletos</p></div></li>').join('');
+  let body = years.length || skipped.length ? '<ul class="divide-y divide-zinc-100 dark:divide-zinc-800">' + rows + skippedRows + '</ul>' :
+    '<p class="text-sm text-zinc-500 dark:text-zinc-400">No hay pestañas «Cuadre AAAA» en la planilla.</p>';
+  if (skipped.length) {
+    const sheet = safeUrl((S.config || {}).sheetUrl);
+    body += '<div class="mt-4 rounded-lg bg-zinc-50 p-3 text-xs leading-relaxed text-zinc-600 ring-1 ring-inset ring-zinc-200 dark:bg-zinc-800/50 dark:text-zinc-300 dark:ring-zinc-700/60">' +
+      '<p><b class="font-semibold text-zinc-900 dark:text-zinc-100">Qué hacer:</b> completa la fila 1 de ' + (one ? 'esa pestaña' : 'esas pestañas') + ' con las columnas del aviso de arriba y recarga.</p>' +
+      '<div class="mt-2.5 flex flex-wrap gap-2">' +
+      (sheet ? btn({ label: 'Abrir planilla', icon: 'external-link', size: 'sm', variant: 'secondary', href: sheet, external: true }) : '') +
+      btn({ label: 'Recargar datos', icon: 'refresh-cw', size: 'sm', variant: 'secondary', action: 'data.refresh' }) + '</div></div>';
+  }
+  return admSetCard({
+    key: 'anios', icon: 'calendar', tone: 'emerald', title: 'Años de presupuesto', body: body,
+    footer: admIsAdmin() ? btn({ label: 'Crear año', icon: 'calendar-plus', variant: 'primary', action: 'admin.createYear' }) : '',
+  });
+}
+
+// Enlace /exec que usan los correos diarios. getAdminStatus: appUrl, appUrlSaved. Sólo se muestra con vista de administración.
+const ADM_APPURL_ID = 'adm-appurl';
+function admAppUrlBlock() {
+  const A = admState();
+  const st = A.status;
+  const url = safeUrl(st ? st.appUrl : (S.config || {}).appUrl);
+  const saved = st ? !!st.appUrlSaved : null;
+  const admin = typeof isAdminUI === 'function' ? isAdminUI() : !!(S.me && S.me.admin);
+  // Sin guardar, el administrador ve el formulario abierto; si ya está guardado, se abre con el lápiz
+  const editing = admin && (saved === false || !!A.appUrlEdit);
+  let pill = '';
+  if (saved != null) pill = saved ? badge('Guardado', 'emerald', 'circle-check') : badge('Sin guardar', 'amber', 'triangle-alert');
+  else if (!A.statusErr) pill = '<span class="skeleton inline-block h-5 w-20 rounded-md"></span>';
+  let h = '<div class="mt-4 border-t border-zinc-100 pt-4 dark:border-zinc-800">' +
+    '<div class="flex items-center justify-between gap-3"><h3 class="flex min-w-0 items-center gap-1.5 text-sm font-medium text-zinc-900 dark:text-zinc-100">' +
+    icon('link', 'size-4 shrink-0 text-zinc-400') + '<span class="truncate">Enlace de la app</span></h3>' + pill + '</div>' +
+    '<div class="mt-2 flex items-center gap-0.5 rounded-lg bg-zinc-50 py-1 pl-2.5 pr-1 ring-1 ring-inset ring-zinc-200 dark:bg-zinc-800/50 dark:ring-zinc-700/60">' +
+    (url ? '<span class="min-w-0 flex-1 break-all py-1 font-mono text-[11px] leading-relaxed text-zinc-700 dark:text-zinc-300">' + esc(url) + '</span>' +
+      iconBtn({ icon: 'copy', action: 'admin.copy', data: { text: url }, title: 'Copiar enlace de la app' }) :
+      '<span class="min-w-0 flex-1 py-1.5 text-xs text-zinc-400 dark:text-zinc-500">Aún no hay enlace</span>') +
+    (admin && !editing ? iconBtn({ icon: 'pencil', action: 'admin.editAppUrl', title: 'Cambiar enlace' }) : '') + '</div>';
+  if (saved === false) {
+    h += '<p class="mt-2.5 flex items-start gap-2 rounded-lg bg-amber-50 p-2.5 text-xs leading-relaxed text-amber-800 ring-1 ring-inset ring-amber-600/15 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-400/20">' +
+      icon('info', 'mt-0.5 size-3.5 shrink-0') + '<span class="min-w-0">Se guarda automáticamente la primera vez que alguien abre la URL publicada (/exec). Los correos usan este enlace.</span></p>';
+  }
+  if (editing) {
+    // Sin guardar: se propone la URL /exec actual para guardarla con un clic (una /dev no sirve para los correos)
+    const val = saved || /\/exec$/.test(url) ? url : '';
+    h += '<div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">' +
+      field({ id: ADM_APPURL_ID, name: 'appUrl', type: 'url', label: 'URL de la implementación', value: val, placeholder: 'https://script.google.com/…/exec', cls: 'min-w-0 flex-1', attrs: 'autocomplete="off" autocapitalize="off" spellcheck="false"' }) +
+      '<div class="flex shrink-0 justify-end gap-2">' +
+      (saved && !A.busy.appUrl ? btn({ label: 'Cancelar', variant: 'ghost', action: 'admin.cancelAppUrl' }) : '') +
+      (A.busy.appUrl ? admSpin('Guardando…') : btn({ label: 'Guardar enlace', icon: 'check', variant: 'secondary', action: 'admin.saveAppUrl' })) + '</div></div>' +
+      '<p class="mt-1.5 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">Cópiala desde Implementar → Gestionar implementaciones (termina en /exec). Déjala vacía y guarda para borrarla.</p>';
+  }
+  return h + '</div>';
+}
+
+function admSheetCard() {
+  const c = S.config || {};
+  const sheet = safeUrl(c.sheetUrl);
+  const linkCls = 'inline-flex min-w-0 items-center gap-1 text-indigo-600 hover:text-indigo-500 dark:text-indigo-400';
+  const rows = [
+    ['Planilla', sheet ? '<a href="' + esc(sheet) + '" target="_blank" rel="noopener noreferrer" class="' + linkCls + '"><span class="truncate">Abrir en Google Sheets</span>' + icon('external-link', 'size-3.5 shrink-0') + '</a>' : '—'],
+    ['Versión', esc(c.version || '—')],
+  ];
+  const body = admDl(rows) + (admIsAdmin() ? admAppUrlBlock() : '');
+  return admSetCard({ key: 'planilla', icon: 'table', tone: 'sky', title: 'Planilla y versión', body: body });
+}
+
+function admTeamCard() {
+  const me = myEmail();
+  const rows = S.users.map(u => '<li class="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">' + avatar(u.email, 'md') +
+      '<div class="min-w-0 flex-1"><p class="flex items-center gap-1.5 text-sm font-medium text-zinc-900 dark:text-zinc-100"><span class="truncate">' + esc(u.name) + '</span>' + (u.email === me ? badge('Tú', 'indigo') : '') + '</p>' +
+      '<p class="truncate text-xs text-zinc-500 dark:text-zinc-400">' + esc(u.email) + '</p></div></li>').join('');
+  return admSetCard({ key: 'equipo', icon: 'users', tone: 'sky', title: 'Equipo', body: '<ul class="divide-y divide-zinc-100 dark:divide-zinc-800">' + rows + '</ul>' + (admIsAdmin() ? admAccessBlock() : '') });
+}
+// Quién puede abrir la app (assertMember_ en el servidor: CONFIG.USERS + ADMINS + propiedad EXTRA_USERS)
+function admAccessBlock() {
+  const b = t => '<b class="font-medium text-zinc-900 dark:text-zinc-100">' + t + '</b>';
+  return '<div class="mt-4 border-t border-zinc-100 pt-4 dark:border-zinc-800">' +
+    '<h3 class="flex items-center gap-1.5 text-sm font-medium text-zinc-900 dark:text-zinc-100">' + icon('lock-keyhole', 'size-4 shrink-0 text-zinc-400') + 'Acceso</h3>' +
+    '<p class="mt-1.5 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">Sólo entran esta lista y los administradores. Para sumar a alguien, agrega su correo en ' + admCode('EXTRA_USERS') +
+    ' (' + b('Apps Script → Configuración del proyecto → Propiedades del script') + '; varios separados por comas).</p></div>';
+}
+
+function admShortcutsCard() {
+  const row = (keys, label) => '<li class="flex items-center justify-between gap-4 py-2 first:pt-0 last:pb-0"><span class="text-sm text-zinc-600 dark:text-zinc-300">' + esc(label) + '</span><span class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">' + keys + '</span></li>';
+  const or = '<span class="text-[11px] text-zinc-400">o</span>';
+  const body = '<ul class="divide-y divide-zinc-100 dark:divide-zinc-800">' +
+    row(admKbd(['⌘', 'K']) + or + admKbd(['Ctrl', 'K']), 'Abrir buscador / asistente') +
+    row(admKbd(['/']), 'Buscar (fuera de un campo de texto)') +
+    row(admKbd(['⌥', 'Enter']) + or + admKbd(['Alt', 'Enter']), 'Buscar en Drive (desde el buscador)') +
+    row(admKbd(['Esc']), 'Cerrar ventana o panel') +
+    row(admKbd(['⌘', 'Enter']) + or + admKbd(['Ctrl', 'Enter']), 'Enviar comentario') +
+    '</ul>';
+  return admSetCard({ key: 'atajos', icon: 'keyboard', tone: 'zinc', title: 'Atajos de teclado', body: body });
+}
+
+/* ---------- Privacidad (para todos) ---------- */
+function admPrivacyCard() {
+  const body = '<p class="text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">' +
+    esc('Las tareas privadas sólo las ven tú y el responsable (tampoco la administración); igual quedan guardadas en la planilla.') + '</p>';
+  return admSetCard({ key: 'privacidad', icon: 'lock', tone: 'emerald', title: 'Privacidad de tus tareas', body: body });
+}
+
+/* ---------- Proyectos desde Cascade (administración) ---------- */
+// Misma regla que importCascadeProjects (SPEC §13.1), sólo para mostrar cuánto falta; el servidor decide.
+function admCascadeImportPreview() {
+  const projCas = new Set((S.projects || []).map(p => p.cascade).filter(Boolean));
+  const taskCas = new Set((S.tasks || []).map(t => t.cascade).filter(Boolean));
+  const out = { projects: 0, tasks: 0 };
+  Object.keys(IDX.cascadeGroups || {}).forEach(k => (IDX.cascadeGroups[k] || []).forEach(g => {
+    const kids = IDX.cascadeChildren.get(g.id) || [];
+    const acts = kids.filter(c => c.clase === 'accion' || c.clase === 'objetivo');
+    if (acts.length) { acts.forEach(c => { if (!projCas.has(c.id)) out.projects++; }); return; }
+    if (!projCas.has(g.id)) out.projects++;
+    kids.forEach(c => { if (c.clase === 'hito' && !taskCas.has(c.id)) out.tasks++; });
+  }));
+  return out;
+}
+function admImportText(np, nt) {
+  return [np ? plural(np, 'proyecto nuevo', 'proyectos nuevos') : '', nt ? plural(nt, 'tarea nueva', 'tareas nuevas') : ''].filter(Boolean).join(' y ');
+}
+function admCascadeImportCard() {
+  const A = admState();
+  const pv = admCascadeImportPreview();
+  const linked = (S.projects || []).filter(p => p.cascade && IDX.cascade.has(p.cascade)).length;
+  const todo = pv.projects + pv.tasks;
+  const li = A.lastImport;
+  let body = '<p class="text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">Cada acción u objetivo de Cascade se vuelve un proyecto; no se duplica nada.</p>' +
+    '<div class="mt-4">' + admDl([
+      ['Vinculados', '<span class="tabular-nums">' + esc(plural(linked, 'proyecto', 'proyectos')) + '</span>'],
+      ['Por importar', todo ? '<span class="tabular-nums">' + esc([plural(pv.projects, 'proyecto', 'proyectos'), pv.tasks ? plural(pv.tasks, 'hito', 'hitos') : ''].filter(Boolean).join(' · ')) + '</span>'
+        : badge('Al día', 'emerald', 'circle-check')],
+    ]) + '</div>';
+  if (li) {
+    body += '<p class="mt-3 flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">' + icon('circle-check', 'size-3.5 shrink-0 text-emerald-500') +
+      esc('Última importación: ' + (li.projects || li.tasks ? admImportText(li.projects, li.tasks) : 'todo estaba al día') + '.') + '</p>';
+  }
+  const footer = btn({ label: 'Ver catálogo', icon: 'target', variant: 'ghost', href: '#/cascade' }) +
+    (A.busy.importCas ? admSpin('Importando…') : btn({ label: 'Importar / completar proyectos', icon: 'import', variant: todo ? 'primary' : 'secondary', action: 'admin.importCascade' }));
+  return admSetCard({
+    key: 'cascade-import', icon: 'folder-kanban', tone: 'violet', title: 'Proyectos desde Cascade', body: body, footer: footer,
+  });
+}
+
+/* ---------- Solicitudes de compra de Ariba (administración) ---------- */
+// getAdminStatus().aprob = {triggerInstalled, lastScan ISO, lastResult, sender, minutes} (Aprobaciones.gs · aprobStatus_)
+// lastResult = {found, added, updated, …} o {error, at} si no se pudo leer Gmail
+function admAprobResult(r) {
+  if (r == null || r === '') return '';
+  if (typeof r !== 'object') return esc(String(r));
+  if (r.error) return '<span class="break-words font-normal text-amber-700 dark:text-amber-400">' + esc('No se pudo leer Gmail: ' + r.error) + '</span>';
+  const added = Number(r.added) || 0, updated = Number(r.updated) || 0, found = Number(r.found) || 0;
+  const parts = [added ? plural(added, 'nueva', 'nuevas') : '', updated ? plural(updated, 'actualizada', 'actualizadas') : ''].filter(Boolean);
+  return esc(parts.length ? parts.join(' · ') : found ? 'Sin novedades · ' + plural(found, 'correo revisado', 'correos revisados') : 'Sin correos nuevos');
+}
+function admScanText(ls) {
+  const added = Number(ls && ls.added) || 0, updated = Number(ls && ls.updated) || 0, found = Number(ls && ls.found) || 0;
+  if (added || updated) {
+    return 'Listo: ' + [added ? plural(added, 'solicitud nueva', 'solicitudes nuevas') : '', updated ? plural(updated, 'actualizada', 'actualizadas') : ''].filter(Boolean).join(' y ');
+  }
+  return found ? 'Todo al día: ' + plural(found, 'correo revisado', 'correos revisados') + ', sin novedades' : 'Todo al día: no hay solicitudes nuevas';
+}
+function admAribaCard() {
+  if (!admFeature('gmail')) return admSafeCard('ariba', 'inbox', 'Solicitudes de compra (Ariba)', 'Gmail');
+  const A = admState();
+  const st = A.status;
+  const ap = st && st.aprob && typeof st.aprob === 'object' ? st.aprob : null;
+  const installed = !!(ap && ap.triggerInstalled);
+  const pend = (S.solicitudes || []).filter(x => x && x.estado === 'Pendiente').length;
+  let status;
+  if (ap) {
+    const hr = ap.hour != null ? Number(ap.hour) : null;
+    status = installed ? badge('Automática · a diario' + (hr != null && isFinite(hr) ? ' ~' + hr + ':00' : ''), 'emerald', 'circle-check') : badge('Sólo manual', 'zinc', 'circle-pause');
+  } else if (A.statusErr) status = '<span class="text-xs text-red-600 dark:text-red-400">No se pudo leer el estado</span>';
+  else if (st) status = badge('No disponible', 'zinc');
+  else status = '<div class="skeleton h-5 w-28 rounded-md"></div>';
+  const rows = [['Revisión', status]];
+  if (ap) {
+    const last = ap.lastScan ? new Date(ap.lastScan) : null;
+    const ok = last && !isNaN(last.getTime());
+    rows.push(['Última revisión', ok ? '<span title="' + esc(fmtDateTime(last)) + '">' + esc(fmtRel(last)) + '</span>' : '<span class="font-normal text-zinc-500 dark:text-zinc-400">Aún no se revisa</span>']);
+    const res = admAprobResult(ap.lastResult);
+    if (res) rows.push(['Resultado', res]);
+  }
+  rows.push(['Por registrar', pend ? '<a href="#/presupuesto/solicitudes" class="inline-flex items-center gap-1 text-indigo-600 hover:text-indigo-500 dark:text-indigo-400">' +
+    esc(plural(pend, 'solicitud', 'solicitudes')) + icon('arrow-right', 'size-3.5 shrink-0') + '</a>' : '<span class="tabular-nums">0</span>']);
+  const sender = ap && ap.sender ? admCode(ap.sender) : 'el remitente de Ariba';
+  // Una sola nota: qué se lee de Gmail y que la aprobación sigue en el mismo correo
+  const body = admDl(rows) +
+    '<p class="mt-4 flex gap-2 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">' + icon('mail-search', 'mt-0.5 size-3.5 shrink-0 text-zinc-400') +
+    '<span class="min-w-0 break-words"><b class="font-medium text-zinc-700 dark:text-zinc-200">Permiso de Gmail:</b> sólo se leen los correos de ' + sender + '; la aprobación la sigues haciendo en el mismo correo.</span></p>';
+  // Servidor sin el módulo de Ariba (getAdminStatus sin «aprob»): no se ofrecen botones que fallarían
+  const footer = st && !ap ? '' :
+    (A.busy.aprobScan ? admSpin('Revisando…') : btn({ label: 'Revisar ahora', icon: 'refresh-cw', variant: installed ? 'primary' : 'secondary', action: 'admin.aprobScan' })) +
+    (installed ? '' : A.busy.aprobInstall ? admSpin('Activando…') : btn({ label: 'Activar revisión automática', icon: 'timer', variant: 'primary', action: 'admin.aprobInstall' }));
+  return admSetCard({
+    key: 'ariba', icon: 'inbox', tone: 'indigo', title: 'Solicitudes de compra (Ariba)',
+    right: A.statusErr ? iconBtn({ icon: 'refresh-cw', action: 'admin.statusReload', title: 'Reintentar' }) : '',
+    body: body, footer: footer,
+  });
+}
+
+/* ---------- Vista: «Ver como admin» (sólo cuentas de administración, SPEC §14.4) ---------- */
+// Apagado: Gonzalo ve exactamente lo del equipo (sin Vista general, Solicitudes, Historial ni tarjetas de administración).
+function admSwitch(on) {
+  return '<span aria-hidden="true" class="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 ' + (on ? 'bg-indigo-600 dark:bg-indigo-500' : 'bg-zinc-300 dark:bg-zinc-600') + '">' +
+    '<span class="ml-0.5 inline-block size-4 rounded-full bg-white shadow-sm ring-1 ring-black/5 transition-transform duration-200 ' + (on ? 'translate-x-4' : 'translate-x-0') + '"></span></span>';
+}
+function admViewCard() {
+  const on = admIsAdmin();
+  // Fila completa (cabe en 375 px): nombre del interruptor, qué significa el estado actual y el interruptor
+  const row = '<button type="button" id="adm-viewas" role="switch" aria-checked="' + on + '" data-action="admin.viewAs" ' +
+    'class="-mx-2 flex w-[calc(100%+1rem)] items-center gap-3 rounded-lg px-2 py-2 text-left transition hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:bg-zinc-800/50">' +
+    '<span class="min-w-0 flex-1"><span class="block text-sm font-medium text-zinc-900 dark:text-zinc-100">Ver como admin</span>' +
+    '<span class="mt-0.5 block text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">' +
+    esc(on ? 'Activado: ves todo, también Vista general, Solicitudes de compra e Historial.' : 'Desactivado: ves exactamente lo que ve el equipo.') + '</span></span>' +
+    admSwitch(on) + '</button>';
+  return admSetCard({
+    key: 'vista', icon: on ? 'shield-check' : 'users', tone: on ? 'indigo' : 'zinc', title: 'Vista',
+    right: on ? badge('Administración', 'indigo') : badge('Equipo', 'zinc'), body: row,
+  });
+}
+
+/* ---------- Carpetas de Drive por proyecto (administración, SPEC §14.3) ---------- */
+// driveStatus() → {configured, root:{id,name,url}|null, admin, error?} · driveSetRoot(urlOrId) → {ok, root}
+// driveCreateMissing() → {created, linked, total, remaining, failed, errors[], done} (se corta a los ~4,5 min: se vuelve a apretar)
+const ADM_DRIVE_ID = 'adm-driveroot';
+function admLoadDrive(force) {
+  const A = admState();
+  if (A.driveLoading || (A.drive && !force)) return;
+  A.driveLoading = true; A.driveErr = '';
+  run('driveStatus').then(r => { A.drive = r && typeof r === 'object' ? r : { configured: false, root: null }; })
+    .catch(e => { A.driveErr = errMsg(e); })
+    .finally(() => { A.driveLoading = false; admRerenderIf('settings'); });
+}
+// Modo seguro (CONFIG.FEATURES en Code.gs): sin permiso de Drive / Gmail
+function admFeature(k) { const f = S.config && S.config.features; return !f || !!f[k]; }
+function admSafeCard(key, iconName, title, what) {
+  return admSetCard({ key: key, icon: iconName, tone: 'zinc', title: title, right: badge('Desactivado', 'zinc', 'shield-check'),
+    body: '<p class="text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">Modo seguro: la app no pide permiso de ' + what +
+      '. Se activa en <span class="font-mono text-xs">Code.gs → CONFIG.FEATURES</span> y con <span class="font-mono text-xs">appsscript.completo.json</span>, cuando TI lo apruebe.</p>' });
+}
+function admDriveCard() {
+  if (!admFeature('drive')) return admSafeCard('drive', 'hard-drive', 'Carpetas de Drive', 'Google Drive');
+  const A = admState();
+  const d = A.drive;
+  const root = d && d.configured && d.root ? d.root : null;
+  const rootUrl = root ? safeUrl(root.url) : '';
+  const editing = !!d && (!root || !!A.driveEdit);
+  const projs = S.projects || [];
+  // Sólo si el servidor ya informa Project.carpeta (si no, un conteo engañaría)
+  const known = projs.some(p => Object.prototype.hasOwnProperty.call(p, 'carpeta'));
+  const missing = known ? projs.filter(p => !p.carpeta).length : null;
+  let right;
+  if (d) right = root ? (d.error ? badge('Revisar', 'amber', 'triangle-alert') : badge('Conectada', 'emerald', 'circle-check')) : badge('Sin configurar', 'amber', 'triangle-alert');
+  else if (A.driveErr) right = iconBtn({ icon: 'refresh-cw', action: 'admin.driveReload', title: 'Reintentar' });
+  else right = '<div class="skeleton h-5 w-24 rounded-md"></div>';
+
+  let body = '<p class="text-sm leading-relaxed text-zinc-600 dark:text-zinc-300">Una carpeta por proyecto (<b class="font-medium text-zinc-900 dark:text-zinc-100">Pilar › Proyecto</b>), creada con tu cuenta dentro de la unidad compartida.</p>';
+  if (!d && A.driveErr) body += '<p class="mt-3 break-words text-xs text-red-600 dark:text-red-400">' + esc('No se pudo leer el estado: ' + A.driveErr) + '</p>';
+  if (d && d.error) body += '<p class="mt-3 flex items-start gap-1.5 break-words text-xs text-amber-700 dark:text-amber-400">' + icon('triangle-alert', 'mt-0.5 size-3.5 shrink-0') + '<span class="min-w-0">' + esc(d.error) + '</span></p>';
+  if (root) {
+    const name = esc(root.name || root.id || 'Carpeta raíz');
+    body += '<div class="mt-3 flex items-center gap-2 rounded-lg bg-zinc-50 py-1 pl-2.5 pr-1 ring-1 ring-inset ring-zinc-200 dark:bg-zinc-800/50 dark:ring-zinc-700/60">' +
+      icon('folder-tree', 'size-4 shrink-0 text-zinc-400') +
+      (rootUrl ? '<a href="' + esc(rootUrl) + '" target="_blank" rel="noopener noreferrer" class="inline-flex min-w-0 flex-1 items-center gap-1 py-1 text-sm font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400"><span class="truncate">' + name + '</span>' + icon('external-link', 'size-3.5 shrink-0') + '</a>'
+        : '<span class="min-w-0 flex-1 truncate py-1 text-sm font-medium text-zinc-800 dark:text-zinc-100">' + name + '</span>') +
+      (editing ? '' : iconBtn({ icon: 'pencil', action: 'admin.driveEdit', title: 'Cambiar carpeta raíz' }) +
+        iconBtn({ icon: 'unlink', action: 'admin.driveDisconnect', title: 'Desconectar carpeta', variant: 'danger-ghost' })) + '</div>';
+    if (projs.length && known) {
+      body += '<p class="mt-2 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">' + esc((projs.length - missing) + ' de ' + plural(projs.length, 'proyecto', 'proyectos') + ' con carpeta') + '</p>';
+    }
+  }
+  if (editing) {
+    body += '<div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-end">' +
+      field({ id: ADM_DRIVE_ID, name: 'driveRoot', label: 'Carpeta raíz en la unidad compartida', value: '', placeholder: 'https://drive.google.com/drive/folders/…', cls: 'min-w-0 flex-1',
+        attrs: 'inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" data-enter="admin.driveSave"' }) +
+      '<div class="flex shrink-0 justify-end gap-2">' +
+      (root && !A.busy.driveRoot ? btn({ label: 'Cancelar', variant: 'ghost', action: 'admin.driveCancel' }) : '') +
+      (A.busy.driveRoot ? admSpin('Guardando…') : btn({ label: 'Guardar', icon: 'check', variant: 'secondary', action: 'admin.driveSave' })) + '</div></div>';
+  }
+  const footer = !d ? '' : A.busy.driveCreate ? admSpin('Creando carpetas…') :
+    btn({ label: 'Crear carpetas que faltan', icon: 'folder-plus', variant: root && missing !== 0 ? 'primary' : 'secondary', action: 'admin.driveCreate', disabled: !root, title: root ? '' : 'Primero guarda la carpeta raíz' });
+  return admSetCard({ key: 'drive', icon: 'hard-drive', tone: 'sky', title: 'Carpetas de Drive', right: right, body: body, footer: footer });
+}
+
+function admSettingsView() {
+  admState();
+  const admin = admIsAdmin();
+  const gem = !!(S.config && S.config.geminiEnabled);
+  const header = pageHeader({ title: 'Ajustes', icon: 'settings', tone: 'zinc' });
+  return header + (admRealAdmin() ? '<div class="mb-6">' + admViewCard() + '</div>' : '') +
+    '<div class="grid items-start gap-6 lg:grid-cols-2">' +
+    '<div class="min-w-0 space-y-6">' + admProfileCard() + admNotifCard() + admPrivacyCard() + admThemeCard() + (admin || gem ? admGeminiCard() : '') + '</div>' +
+    '<div class="min-w-0 space-y-6">' + (admin ? admDriveCard() + admAribaCard() + admCascadeImportCard() : '') + admYearsCard() + admSheetCard() + admTeamCard() + admShortcutsCard() + '</div>' +
+    '</div>';
+}
+function admSettingsMount(root, params, ctx) {
+  const A = admState();
+  const inp = root.querySelector('#' + ADM_APPURL_ID);
+  if (inp) inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); dispatch('admin.saveAppUrl', inp, e); }
+  });
+  if (admIsAdmin() && !A.drive && !A.driveErr) admLoadDrive(false);
+  if (A.statusLoading) return;
+  if (!A.status && !A.statusErr) { admLoadStatus(false); return; }
+  if (ctx && ctx.animate && A.status && Date.now() - (A.statusAt || 0) > 120000) admLoadStatus(true);
+}
+
+action('admin.theme', d => {
+  const v = ['system', 'light', 'dark'].indexOf(d.value) >= 0 ? d.value : 'system';
+  LS.set('theme', v); applyTheme(v); renderTopbar(); rerender();
+});
+action('admin.whoami', (d, el) => {
+  const v = String(el.value || '');
+  LS.set('whoami', v);
+  renderShell(); rerender();
+  if (v) toast('Listo: te identificamos como ' + userName(v), 'success');
+});
+action('admin.forgetWhoami', () => { LS.set('whoami', ''); renderShell(); rerender(); toast('Identidad olvidada en este navegador', 'info'); });
+action('admin.statusReload', () => { admLoadStatus(true); rerender(); });
+action('admin.installTrigger', () => {
+  const A = admState();
+  if (!(S.me && S.me.admin) || A.busy.install) return;
+  A.busy.install = true; rerender();
+  run('installTrigger').then(r => {
+    toast(r && r.installed === false ? 'No se pudo instalar el envío automático' : 'Aviso instalado: se revisa cada día a las ~08:00', r && r.installed === false ? 'error' : 'success');
+    admLoadStatus(true);
+  }).catch(e => toast(errMsg(e), 'error'))
+    .finally(() => { A.busy.install = false; admRerenderIf('settings'); });
+});
+action('admin.testDigest', () => {
+  const A = admState();
+  if (A.busy.test) return;
+  A.busy.test = true; rerender();
+  run('sendTestDigest').then(r => {
+    if (r && r.sent === false) { toast('No se envió el correo de prueba', 'error'); return; }
+    const to = (r && r.to) || myEmail() || 'tu correo';
+    toast('Enviado a ' + to + (r && r.count != null ? ' · ' + plural(Number(r.count) || 0, 'tarea', 'tareas') : ''), 'success');
+  }).catch(e => toast(errMsg(e), 'error'))
+    .finally(() => { A.busy.test = false; admRerenderIf('settings'); });
+});
+action('admin.createYear', () => {
+  if (!(S.me && S.me.admin)) return;
+  const ys = S.years || [];
+  const next = ys.length ? Math.max.apply(null, ys) + 1 : new Date().getFullYear();
+  promptDialog({ title: 'Crear año de presupuesto', label: 'Año', value: String(next), type: 'number', confirmLabel: 'Crear pestaña' }).then(v => {
+    if (v == null) return;
+    const y = parseInt(v, 10);
+    if (!(y >= 2000 && y <= 2100)) { toast('Ingresa un año válido (ej: ' + next + ')', 'error'); return; }
+    if (ys.indexOf(y) >= 0) { toast('La pestaña «Cuadre ' + y + '» ya existe', 'error'); return; }
+    mutate('budgetCreateYear', [y], { success: 'Pestaña «Cuadre ' + y + '» creada' });
+  });
+});
+action('admin.gotoYear', d => {
+  const y = Number(d.year);
+  if ((S.years || []).indexOf(y) < 0) return;
+  S.year = y; LS.set('year', y); renderShell();
+  go('#/presupuesto');
+});
+action('admin.saveAppUrl', () => {
+  const A = admState();
+  if (!(S.me && S.me.admin) || A.busy.appUrl) return;
+  const inp = document.getElementById(ADM_APPURL_ID);
+  if (!inp) return;
+  const u = String(inp.value || '').trim();
+  if (!u && !(A.status && A.status.appUrlSaved)) { toast('Pega la URL /exec de la implementación', 'info'); inp.focus(); return; }
+  A.busy.appUrl = true; rerender();
+  mutate('setAppUrl', [u], { success: u ? 'Enlace guardado' : 'Enlace borrado' }).then(b => {
+    if (!b) return; // error ya mostrado; se conserva lo escrito
+    // Se descarta lo escrito para mostrar lo que quedó guardado (el servidor quita ?… y #…)
+    const el = document.getElementById(ADM_APPURL_ID);
+    if (el) el.value = el.defaultValue;
+    A.appUrlEdit = false;
+    const now = b.config && b.config.appUrl;
+    if (A.status && !b.stale && now) { A.status.appUrl = now; A.status.appUrlSaved = !!u; } // admLoadStatus confirma
+    if (u && now && now !== u.replace(/[?#].*$/, '')) toast('CONFIG.APP_URL (Code.gs) tiene prioridad sobre el enlace guardado aquí', 'info');
+    admLoadStatus(true);
+  }).finally(() => { A.busy.appUrl = false; admRerenderIf('settings'); });
+});
+action('admin.editAppUrl', () => {
+  const A = admState();
+  if (!(S.me && S.me.admin)) return;
+  A.appUrlEdit = true; rerender();
+  const el = document.getElementById(ADM_APPURL_ID);
+  if (el) { el.focus(); try { el.select(); } catch (e) {} }
+});
+action('admin.cancelAppUrl', () => {
+  const A = admState();
+  if (A.busy.appUrl) return;
+  A.appUrlEdit = false; rerender();
+});
+action('admin.copy', d => { if (d.text) copyText(d.text); });
+action('admin.importCascade', () => {
+  const A = admState();
+  if (!admIsAdmin() || A.busy.importCas) return;
+  A.busy.importCas = true; rerender();
+  mutate('importCascadeProjects', [], { silent: true }).then(b => {
+    if (!b || b.stale) return;   // error o recarga aparte: mutate ya avisó
+    const li = b.lastImport || {};
+    const np = Number(li.projects) || 0, nt = Number(li.tasks) || 0;
+    A.lastImport = { projects: np, tasks: nt };
+    toast(np || nt ? 'Listo: ' + admImportText(np, nt) : 'Todo estaba al día: no faltaba ningún proyecto', 'success');
+  }).finally(() => { A.busy.importCas = false; admRerenderIf('settings'); });
+});
+action('admin.aprobInstall', () => {
+  const A = admState();
+  if (!admIsAdmin() || A.busy.aprobInstall) return;
+  A.busy.aprobInstall = true; rerender();
+  run('aprobInstall').then(r => {
+    // aprobInstall pasa por mutate_: el bundle trae aprobInstall {installed, created, minutes} y aprob (estado)
+    const ins = (r && r.aprobInstall) || r || {};
+    const ok = ins.installed !== false;
+    if (ok && r && r.aprob && A.status) A.status.aprob = r.aprob;
+    toast(ok ? 'Revisión automática activada: una vez al día' + (ins.hour != null ? ' (~' + ins.hour + ':00)' : '') + '. Y cuando quieras, «Revisar ahora».' : 'No se pudo activar la revisión automática', ok ? 'success' : 'error');
+    admLoadStatus(true);
+  }).catch(e => toast(errMsg(e), 'error'))
+    .finally(() => { A.busy.aprobInstall = false; admRerenderIf('settings'); });
+});
+action('admin.aprobScan', () => {
+  const A = admState();
+  if (!admIsAdmin() || A.busy.aprobScan) return;
+  A.busy.aprobScan = true; rerender();
+  mutate('aprobScan', [], { silent: true }).then(b => {
+    if (!b || b.stale) return;
+    if (b.aprob && A.status) A.status.aprob = b.aprob;
+    toast(admScanText(b.lastScan), 'success');
+    admLoadStatus(true);
+  }).finally(() => { A.busy.aprobScan = false; admRerenderIf('settings'); });
+});
+
+action('admin.viewAs', () => {
+  if (!admRealAdmin()) return;
+  const on = !admIsAdmin();
+  if (typeof setAdminView === 'function') setAdminView(on);
+  else { LS.set('adminView', on); renderShell(); rerender(); }
+  toast(on ? 'Vista de administración' : 'Ahora ves la app como el equipo', 'info');
+});
+action('admin.driveReload', () => { const A = admState(); A.driveErr = ''; admLoadDrive(true); rerender(); });
+action('admin.driveEdit', () => {
+  const A = admState();
+  if (!admIsAdmin()) return;
+  A.driveEdit = true; rerender();
+  const el = document.getElementById(ADM_DRIVE_ID);
+  if (el) el.focus();
+});
+action('admin.driveDisconnect', () => {
+  confirmDialog({ title: '¿Desconectar la carpeta de Drive?', message: 'La app deja de crear carpetas y de mostrar archivos. Las carpetas y archivos que ya existen en Drive no se tocan.', confirmLabel: 'Desconectar', danger: true })
+    .then(ok => {
+      if (!ok) return;
+      run('driveSetRoot', ['']).then(() => { toast('Carpeta de Drive desconectada', 'success'); refreshData(true); const A = admState(); A.drive = null; A.driveEdit = false; admLoadDrive(true); rerender(); })
+        .catch(e => toast(errMsg(e), 'error'));
+    });
+});
+action('admin.driveCancel', () => { const A = admState(); if (A.busy.driveRoot) return; A.driveEdit = false; rerender(); });
+action('admin.driveSave', () => {
+  const A = admState();
+  if (!admIsAdmin() || A.busy.driveRoot) return;
+  const inp = document.getElementById(ADM_DRIVE_ID);
+  const v = String((inp && inp.value) || '').trim();
+  if (!v) { toast('Pega el link de la carpeta de la unidad compartida', 'info'); if (inp) inp.focus(); return; }
+  A.busy.driveRoot = true; rerender();
+  run('driveSetRoot', v).then(r => {
+    if (!r || r.ok === false || !r.root) { toast('No se pudo guardar la carpeta', 'error'); return; }
+    A.drive = Object.assign({}, A.drive || {}, { configured: true, root: r.root });
+    A.driveEdit = false;
+    const el = document.getElementById(ADM_DRIVE_ID);
+    if (el) el.value = el.defaultValue;
+    toast('Carpeta raíz guardada' + (r.root.name ? ': ' + r.root.name : ''), 'success');
+    admLoadDrive(true);
+  }).catch(e => toast(errMsg(e), 'error'))   // se conserva lo escrito
+    .finally(() => { A.busy.driveRoot = false; admRerenderIf('settings'); });
+});
+// Texto y tono del aviso después de «Crear carpetas que faltan»
+function admDriveCreateMsg(r) {
+  r = r || {};
+  const n = k => Number(r[k]) || 0;
+  const created = n('created'), linked = n('linked'), total = n('total'), remaining = n('remaining'), failed = n('failed');
+  const errs = Array.isArray(r.errors) ? r.errors.filter(Boolean) : [];
+  if (!created && !linked && !failed && !remaining) {
+    return { text: total ? 'No faltaba ninguna: ' + plural(total, 'proyecto', 'proyectos') + ' con carpeta' : 'Aún no hay proyectos', type: 'success' };
+  }
+  const parts = [created ? plural(created, 'carpeta creada', 'carpetas creadas') : '', linked ? plural(linked, 'vinculada', 'vinculadas') : ''].filter(Boolean);
+  let text = parts.length ? 'Listo: ' + parts.join(' y ') + (total ? ' (de ' + plural(total, 'proyecto', 'proyectos') + ')' : '') : '';
+  if (failed) text += (text ? ' · ' : '') + plural(failed, 'con error', 'con error') + (errs.length ? ': ' + errs[0] : '');
+  if (remaining > failed) text += (text ? ' · ' : '') + 'faltan ' + (remaining - failed) + ': vuelve a apretar el botón';
+  return { text: text, type: failed && !parts.length ? 'error' : failed || remaining > failed ? 'info' : 'success' };
+}
+action('admin.driveCreate', () => {
+  const A = admState();
+  if (!admIsAdmin() || A.busy.driveCreate) return;
+  if (!(A.drive && A.drive.configured)) { toast('Primero guarda la carpeta raíz', 'info'); return; }
+  A.busy.driveCreate = true; rerender();
+  run('driveCreateMissing').then(r => {
+    const m = admDriveCreateMsg(r);
+    toast(m.text, m.type);
+    if (r && (Number(r.created) || Number(r.linked)) && typeof refreshData === 'function') refreshData(true);   // trae Project.carpeta
+  }).catch(e => toast(errMsg(e), 'error'))
+    .finally(() => { A.busy.driveCreate = false; admRerenderIf('settings'); });
+});
+
+registerView('settings', { title: 'Ajustes', render: admSettingsView, mount: admSettingsMount });
+</script>

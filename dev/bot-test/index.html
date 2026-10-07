@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<title>Pruebas · receptor WhatsApp</title>
+<body style="font-family:ui-monospace,monospace;padding:16px;font-size:13px">
+<h1 style="font-family:system-ui">Pruebas de la alternativa Cloudflare (bot-whatsapp/alternativa-cloudflare/worker.js)</h1>
+<pre id="out">Corriendo…</pre>
+<script type="module">
+import worker from '../../bot-whatsapp/alternativa-cloudflare/worker.js';
+
+const out = [];
+let pass = 0, fail = 0;
+const log = s => { out.push(s); document.getElementById('out').textContent = out.join('\n'); };
+async function test(name, fn) {
+  try { await fn(); pass++; log('PASS  ' + name); } catch (e) { fail++; log('FAIL  ' + name + '\n      ' + (e && e.message)); console.error(e); }
+}
+const ok = (c, m) => { if (!c) throw new Error(m || 'falló'); };
+const eq = (a, b, m) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error((m || '') + ' — esperado ' + JSON.stringify(b) + ' · recibido ' + JSON.stringify(a)); };
+const enc = new TextEncoder();
+
+// ---------- Llave de prueba para la "cuenta robot" (RSA real, generada aquí) ----------
+const kp = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify']);
+const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', kp.privateKey));
+let b = ''; pkcs8.forEach(x => b += String.fromCharCode(x));
+const pem = '-----BEGIN PRIVATE KEY-----\n' + btoa(b).match(/.{1,64}/g).join('\n') + '\n-----END PRIVATE KEY-----\n';
+const SA = { type: 'service_account', client_email: 'bot-tareas@proyecto-prueba.iam.gserviceaccount.com', private_key: pem, token_uri: 'https://oauth2.googleapis.com/token' };
+
+const ENV = {
+  VERIFY_TOKEN: 'verificar-123', APP_SECRET: 'secreto-de-la-app', SHEET_ID: 'SHEET123', GOOGLE_SA_JSON: JSON.stringify(SA),
+  PHONE_NUMBER_ID: '1111222233334444', WA_TOKEN: 'EAAGtoken', CONTACT_EMAIL: 'admin@ejemplo.cl',
+};
+
+// ---------- Meta y Google simulados (se intercepta fetch) ----------
+const calls = [];
+let contacts = ['+56 9 1111 1111', '56922222222', ''];
+let failAppend = false;
+const b64urlDecode = s => atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+window.fetch = async (url, opts = {}) => {
+  url = String(url);
+  calls.push({ url, method: opts.method || 'GET', body: opts.body, headers: opts.headers || {} });
+  if (url === 'https://oauth2.googleapis.com/token') {
+    const assertion = new URLSearchParams(opts.body).get('assertion');
+    const [h, c, s] = assertion.split('.');
+    const sig = Uint8Array.from(b64urlDecode(s), ch => ch.charCodeAt(0));
+    const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', kp.publicKey, sig, enc.encode(h + '.' + c));
+    const claim = JSON.parse(b64urlDecode(c));
+    if (!valid || claim.iss !== SA.client_email || claim.scope !== 'https://www.googleapis.com/auth/spreadsheets') {
+      return new Response('{"error":"invalid_grant"}', { status: 400 });
+    }
+    return new Response(JSON.stringify({ access_token: 'ya29.prueba', expires_in: 3600 }), { status: 200 });
+  }
+  if (url.startsWith('https://sheets.googleapis.com/v4/spreadsheets/SHEET123/values/')) {
+    if ((opts.headers || {}).authorization !== 'Bearer ya29.prueba') return new Response('no auth', { status: 401 });
+    if ((opts.method || 'GET') === 'GET') return new Response(JSON.stringify({ values: [contacts] }), { status: 200 });
+    if (failAppend) return new Response('backend error', { status: 500 });
+    return new Response(JSON.stringify({ updates: { updatedRows: JSON.parse(opts.body).values.length } }), { status: 200 });
+  }
+  if (url.startsWith('https://graph.facebook.com/')) return new Response('{"success":true}', { status: 200 });
+  return new Response('no simulado: ' + url, { status: 599 });
+};
+
+async function sign(raw) {
+  const key = await crypto.subtle.importKey('raw', enc.encode(ENV.APP_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, enc.encode(raw)));
+  return 'sha256=' + Array.from(mac, x => x.toString(16).padStart(2, '0')).join('');
+}
+function payload(messages, extra = {}) {
+  return { object: 'whatsapp_business_account', entry: [{ id: 'WABA1', changes: [{ field: 'messages', value: Object.assign({
+    messaging_product: 'whatsapp', metadata: { display_phone_number: '56900000000', phone_number_id: extra.pnid || ENV.PHONE_NUMBER_ID },
+    contacts: messages.map(m => ({ profile: { name: m.name || 'Persona' }, wa_id: m.from })), messages: messages,
+  }, extra.value || {}) }] }] };
+}
+const txt = (id, from, body, name) => ({ id, from, name, timestamp: String(Math.floor(Date.UTC(2026, 9, 5, 15, 0, 0) / 1000)), type: 'text', text: { body } });
+async function post(obj, { badSig = false } = {}) {
+  const raw = JSON.stringify(obj);
+  const waits = [];
+  const res = await worker.fetch(new Request('https://bot.ejemplo.workers.dev/', {
+    method: 'POST', body: raw, headers: { 'content-type': 'application/json', 'x-hub-signature-256': badSig ? 'sha256=' + '0'.repeat(64) : await sign(raw) },
+  }), ENV, { waitUntil: p => waits.push(p) });
+  await Promise.all(waits);
+  return res;
+}
+const appends = () => calls.filter(c => c.url.includes(':append'));
+const reads = () => calls.filter(c => c.url.startsWith('https://graph.facebook.com/'));
+const tokenCalls = () => calls.filter(c => c.url === 'https://oauth2.googleapis.com/token');
+
+await test('GET: prueba de conexión de Meta con el token correcto devuelve el challenge', async () => {
+  const r = await worker.fetch(new Request('https://bot.ejemplo.workers.dev/?hub.mode=subscribe&hub.verify_token=verificar-123&hub.challenge=987654'), ENV, {});
+  eq(r.status, 200); eq(await r.text(), '987654');
+});
+await test('GET: token incorrecto → 403', async () => {
+  const r = await worker.fetch(new Request('https://bot.ejemplo.workers.dev/?hub.mode=subscribe&hub.verify_token=otro&hub.challenge=1'), ENV, {});
+  eq(r.status, 403);
+});
+await test('POST con firma inválida → 401 y no toca la planilla', async () => {
+  calls.length = 0;
+  const r = await post(payload([txt('wamid.1', '56911111111', 'hola')]), { badSig: true });
+  eq(r.status, 401); eq(calls.length, 0, 'sin llamadas');
+});
+await test('POST sólo con estados (entregado/leído) → 200 sin llamadas', async () => {
+  calls.length = 0;
+  const r = await post({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: ENV.PHONE_NUMBER_ID }, statuses: [{ id: 'wamid.x', status: 'read' }] } }] }] });
+  eq(r.status, 200); eq(calls.length, 0);
+});
+await test('Mensaje de un número del equipo → una fila RAW en "WhatsApp" + marcado como leído', async () => {
+  calls.length = 0;
+  const r = await post(payload([txt('wamid.A', '56911111111', 'Enviar informe a la fundación mañana', 'Gonzalo')]));
+  eq(r.status, 200);
+  eq(appends().length, 1, 'un append');
+  const a = appends()[0];
+  ok(a.url.includes(encodeURIComponent("'WhatsApp'!A1") + ':append?valueInputOption=RAW'), 'RAW en la pestaña WhatsApp: ' + a.url);
+  eq(JSON.parse(a.body).values, [['2026-10-05T15:00:00.000Z', 'wamid.A', '56911111111', 'Gonzalo', 'Enviar informe a la fundación mañana', 'Nueva', '', '']]);
+  eq(reads().length, 1, 'marcado como leído');
+  eq(JSON.parse(reads()[0].body), { messaging_product: 'whatsapp', status: 'read', message_id: 'wamid.A' });
+  ok(reads()[0].url === 'https://graph.facebook.com/v25.0/1111222233334444/messages', reads()[0].url);
+  ok(!calls.some(c => c.url.startsWith('https://graph.facebook.com/') && JSON.parse(c.body).type), 'nunca envía mensajes (costo 0)');
+});
+await test('El token de Google se reutiliza (no se pide uno nuevo por mensaje)', async () => {
+  calls.length = 0;
+  await post(payload([txt('wamid.B', '56922222222', 'Revisar contrato 15/10')]));
+  eq(tokenCalls().length, 0, 'token en caché');
+});
+await test('Número que no es del equipo → se ignora: sin fila y sin ✓✓', async () => {
+  calls.length = 0;
+  const r = await post(payload([txt('wamid.Z', '56999999999', 'spam')]));
+  eq(r.status, 200); eq(appends().length, 0); eq(reads().length, 0);
+});
+await test('Texto con fórmula se envía tal cual con RAW (la planilla no lo ejecuta)', async () => {
+  calls.length = 0;
+  await post(payload([txt('wamid.F', '56911111111', '=IMPORTXML("https://x","//a")')]));
+  ok(appends()[0].url.includes('valueInputOption=RAW')); eq(JSON.parse(appends()[0].body).values[0][4], '=IMPORTXML("https://x","//a")');
+});
+await test('Varios mensajes en un aviso: una sola escritura; imágenes quedan anotadas', async () => {
+  calls.length = 0;
+  await post(payload([
+    txt('wamid.M1', '56911111111', 'Tarea uno'),
+    { id: 'wamid.M2', from: '56922222222', timestamp: '1759676400', type: 'image', image: { id: 'm1' } },
+    txt('wamid.M3', '56999999999', 'de afuera'),
+  ]));
+  eq(appends().length, 1);
+  const v = JSON.parse(appends()[0].body).values;
+  eq(v.length, 2, 'sólo los dos del equipo');
+  eq(v[1][4], ''); eq(v[1][7], 'Tipo no soportado: image');
+  eq(reads().length, 2);
+});
+await test('Aviso de otro número del bot (phone_number_id distinto) → se ignora', async () => {
+  calls.length = 0;
+  await post(payload([txt('wamid.O', '56911111111', 'hola')], { pnid: '999' }));
+  eq(appends().length, 0);
+});
+await test('Si Google falla → 500 (Meta reintenta más tarde) y no marca como leído', async () => {
+  calls.length = 0; failAppend = true;
+  const r = await post(payload([txt('wamid.E', '56911111111', 'Reintentar esto')]));
+  failAppend = false;
+  eq(r.status, 500); eq(reads().length, 0);
+});
+await test('Sin WA_TOKEN igual guarda (sin ✓✓)', async () => {
+  calls.length = 0;
+  const env2 = Object.assign({}, ENV, { WA_TOKEN: '' });
+  const raw = JSON.stringify(payload([txt('wamid.N', '56911111111', 'Sin token')]));
+  const r = await worker.fetch(new Request('https://bot.ejemplo.workers.dev/', { method: 'POST', body: raw, headers: { 'x-hub-signature-256': await sign(raw) } }), env2, { waitUntil() {} });
+  eq(r.status, 200); eq(appends().length, 1); eq(reads().length, 0);
+});
+await test('/privacidad responde una página pública (requisito de Meta para publicar la app)', async () => {
+  const r = await worker.fetch(new Request('https://bot.ejemplo.workers.dev/privacidad'), ENV, {});
+  eq(r.status, 200); const h = await r.text(); ok(/Política de privacidad/.test(h) && /admin@ejemplo\.cl/.test(h));
+});
+
+log('\nResultado: ' + pass + ' PASS · ' + fail + ' FAIL');
+window.__RESULT = { pass, fail, out };
+</script>
+</body>
+</html>

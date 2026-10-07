@@ -1,0 +1,110 @@
+Solicitud de compra
+Es necesaria una acción por su parte
+Este/esta solicitud de compra que GONZALO ALEJANDRO
+CORTES UARAC ha enviado , requiere su aprobación.
+Motivo: Responsable CECO
+Haga clic en Aprobar o Denegar para aprobar o denegar Solicitud de
+compra,y escriba sus comentarios en el mensaje de correo electrónico
+que se abrirá. Para ver Solicitud de compra en la solución de Ariba,
+haga clic en Ver
+En representación de
+GONZALO ALEJANDRO
+CORTES UARAC
+Solicitud de compra
+PR71524 - Piloto Green Energy
+en Transcom
+Creado
+viernes, 2 octubre, 2026 a las
+11:17, CLST
+Importe total
+$13.473.363,17 CLP
+Este documento tiene adjuntos.
+Aprobar Denegar Ver
+Detalles de cabecera
+Max Approval Amount
+328,03 CLF
+Artículos en línea
+1 Descripción
+Piloto de paneles solares flexibles
+Green Energy en camiones de
+Transcom
+Asignación de cuentas
+K(Centro de coste)
+Proveedor
+LUXMETER
+ENERGY SPA
+Entregar a
+Gonzalo
+Cortés
+Ctd.
+1,00
+Unidad
+cada
+uno
+Precio
+328,03
+CLF
+Importe
+328,03
+CLF
+Cuenta contable Centro de costes Tipo Proporción
+0005606700(Materiales y equipos
+Pilotos Garage)
+XUF81084(NUEVAS
+ENERGIAS) Importe 218,23
+CLF
+0005602585(Est. y Asesorías por
+Cumplim. Normativas)
+XUF80853(PROY.CAMBIOS
+CLIMA) Importe 109,80
+CLF
+Comentarios recientes
+viernes, 2 octubre, 2026 a las 12:26, CLST: GONZALO ALEJANDRO CORTES UARAC - Se
+adjunta propuesta comercial y carta de proveedor unico para proyecto piloto. Se va a pilotear
+tecnología de paneles solares flexibles en camiones de Transcom para buscar ahorro de
+combustible de los vehiculos.
+Flujo de aprobación (A partir de viernes, 2 octubre, 2026 a las 16:05, CLST)
+Estado Necesario Motivo Responsable de
+aprobación Fecha Hora
+Aprobado Sí
+Validacion de
+compras
+superior a 150
+CLF
+Francisca Ignacia Garcés
+Fuentes (en representación
+de REVISION COMPRAS)
+2
+octubre,
+2026
+15:00
+Aprobado Sí
+Jefe de
+compras Jefe
+de compra 150
+uf
+Marta Montero Castro (en
+representación de BUYING
+JEFE DE COMPRAS)
+2
+octubre,
+2026
+16:05
+Listo para
+su
+aprobación
+Sí Responsable
+CECO
+RAMON SALINAS
+ERRAZURIZ
+Listo para
+su
+aprobación
+Sí Responsable
+CECO
+GONZALO EDUARDO
+VICENCIO SANCHEZ
+Aprobar Denegar Ver
+Ahora puede aprobar solicitudes de compra desde un dispositivo móvil. Obtenga hoy mismo la
+aplicación SAP Ariba Procurement.
+Derechos de autor © 2005 - 2026 Ariba, Inc., Todos los derechos reservados.

@@ -1,0 +1,2565 @@
+<script>
+/* =====================================================================
+   FGestion · drawers, modales y widgets compartidos de Gestión
+   (SPEC §6.4, §7, §8, §13). Globales públicos:
+   openProject, openProjectForm, openTask, openTaskForm, openCompleteTask,
+   cascadePickerHtml, evidenceEditorHtml, readEvidence, taskRow,
+   fgProjCascade, fgProjectPayload, fgTaskPayload.
+   Acciones: task.* (incluye task.toggle y task.cmp.* del compositor), project.* (project.drive.* = pestaña Drive),
+   cascade.picker.*, evidence.*
+   v3.1 (SPEC §14): pestaña «Drive» del proyecto (driveList / driveUpload / driveFolder), «Subir archivo» en el editor
+   de links, alta rápida con pickDate después de Enter y menos texto en pantalla (§14.4).
+   v3.2 (SPEC §15): el compositor parte privado sin proyecto y compartido con proyecto (fgCmpAutoPriv, hasta que se
+   toque el interruptor); el alta rápida del proyecto envía privada: false.
+   ===================================================================== */
+
+// Pila de navegación entre drawers (proyecto ⇄ tarea), guardados en curso por tarea (interruptores),
+// último toque del check por tarea (evita dobles clics mientras se guarda), altas rápidas del proyecto aún sin
+// confirmar (qa) y estado de Drive compartido (driveOff = el servidor dijo que no hay carpeta raíz).
+const FG_STATE = { stack: [], animTab: false, busy: {}, tapAt: {}, qa: [], upSeq: 0, dropOn: false, driveOff: false };
+const FG_DIAS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+// Nombres cortos para los mini-chips de pilar del compositor (el nombre completo va en el title)
+const FG_PIL_SHORT = { cc: 'Clima', ec: 'Circular', nat: 'Naturaleza' };
+// Chips suaves (sin anillo): el rojo queda sólo para lo atrasado
+const FG_SOFT = {
+  red: 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300',
+  amber: 'bg-amber-50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300',
+  emerald: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
+  indigo: 'bg-indigo-50 text-indigo-700 dark:bg-indigo-500/10 dark:text-indigo-300',
+  zinc: 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300',
+};
+// Píldoras del compositor de tareas
+const FG_PILL = 'inline-flex h-7 min-w-0 max-w-full select-none items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition active:scale-[.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 disabled:cursor-not-allowed disabled:opacity-60';
+const FG_PILL_OFF = 'border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 aria-expanded:border-zinc-400 aria-expanded:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:border-zinc-600 dark:hover:text-white dark:aria-expanded:border-zinc-500 dark:aria-expanded:text-white';
+const FG_PILL_ON = 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:border-indigo-300 aria-expanded:border-indigo-400 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:text-indigo-300 dark:hover:border-indigo-400/50 dark:aria-expanded:border-indigo-400/70';
+const FG_PILL_LATE = 'border-red-200 bg-red-50 text-red-700 hover:border-red-300 aria-expanded:border-red-400 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300 dark:hover:border-red-400/50';
+const FG_TABS = ['resumen', 'tareas', 'presupuesto', 'comentarios', 'drive'];
+// Modo seguro: sin permiso de Drive no se muestra la pestaña ni la subida de evidencias a Drive
+function fgDriveOn() { const f = S && S.config && S.config.features; return !f || !!f.drive; }
+// Drive (SPEC §14.3): máximo por archivo (decodificado) y vigencia del listado en caché por proyecto
+const FG_DRIVE_MAX = 20 * 1024 * 1024;
+const FG_DRIVE_TTL = 3 * 60 * 1000;
+// kind (driveList) → [ícono, tono]
+const FG_DRIVE_KIND = {
+  image: ['file-image', 'violet'], pdf: ['file-text', 'red'], doc: ['file-text', 'sky'], sheet: ['file-spreadsheet', 'emerald'],
+  slide: ['presentation', 'amber'], folder: ['folder', 'zinc'], video: ['file-play', 'violet'], file: ['file', 'zinc'],
+};
+const FG_ESTADOS = [
+  { value: 'Activo', tone: 'emerald', icon: 'circle-dot' },
+  { value: 'En pausa', tone: 'amber', icon: 'hourglass' },
+  { value: 'Cerrado', tone: 'zinc', icon: 'circle-check' },
+];
+const FG_LINE_ESTADO = {
+  'Ejecutado': ['emerald', 'circle-check'],
+  'En curso': ['sky', 'circle-dot'],
+  'Por ejecutar': ['amber', 'clock'],
+  'No se realizará': ['zinc', 'circle-x'],
+};
+const FG_EV_NAMES = {
+  'file-spreadsheet': 'Planilla de Google',
+  'file-text': 'Documento de Google',
+  'presentation': 'Presentación de Google',
+  'folder': 'Carpeta de Drive',
+  'file': 'Archivo de Drive',
+};
+const FG_RED = 'rgb(239 68 68)';
+
+/* ---------- Utilidades internas ---------- */
+function fgUi() {
+  S.ui = S.ui || {};
+  S.ui.forms = S.ui.forms || {};
+  if (!S.ui.forms.projectTab) S.ui.forms.projectTab = 'resumen';
+  return S.ui.forms;
+}
+function fgReady() { return !!(S && IDX && IDX.project && IDX.task); }
+function fgCmpStr(a, b) { return String(a || '').localeCompare(String(b || ''), 'es', { sensitivity: 'base' }); }
+function fgByDue(a, b) {
+  const x = a.fecha || '9999-12-31', y = b.fecha || '9999-12-31';
+  return x < y ? -1 : x > y ? 1 : fgCmpStr(a.nombre, b.nombre);
+}
+function fgByDoneDesc(a, b) {
+  const x = a.completada || '', y = b.completada || '';
+  return x > y ? -1 : x < y ? 1 : fgCmpStr(a.nombre, b.nombre);
+}
+function fgClip(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+function fgMuted(text) { return '<span class="text-zinc-400 dark:text-zinc-500">' + esc(text) + '</span>'; }
+function fgFieldLabel(text) { return '<p class="' + CX.label + '">' + esc(text) + '</p>'; }
+function fgSection(title, inner, count) {
+  return '<section><h3 class="mb-2.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">' + esc(title) +
+    (count ? '<span class="rounded-full bg-zinc-100 px-1.5 text-[10px] font-medium tabular-nums tracking-normal text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">' + count + '</span>' : '') + '</h3>' + inner + '</section>';
+}
+function fgLinkBtn(label, act, data, inline) {
+  return '<button type="button" data-action="' + esc(act) + '"' + dataAttrs(data) + ' class="' + (inline ? '' : 'mt-2 ') + 'inline-flex items-center gap-1 rounded text-xs font-medium text-indigo-600 transition hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400 dark:hover:text-indigo-300">' +
+    esc(label) + icon('arrow-right', 'size-3 shrink-0') + '</button>';
+}
+// Botón con texto sólo desde sm (en móvil queda como ícono con aria-label).
+function fgRBtn(o) {
+  const cls = 'inline-flex h-9 select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-sm font-medium transition active:scale-[.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 sm:px-3.5 ' +
+    (BTN_VARIANTS[o.variant] || BTN_VARIANTS.secondary) + ' ' + (o.cls || '');
+  const t = o.title || o.label;
+  return '<button type="button" class="' + cls + '" data-action="' + esc(o.action) + '"' + dataAttrs(o.data) + ' title="' + esc(t) + '" aria-label="' + esc(t) + '">' +
+    icon(o.icon, 'size-4 shrink-0') + '<span class="hidden sm:inline">' + esc(o.label) + '</span></button>';
+}
+function fgModKey() { return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '') ? '⌘' : 'Ctrl'; }
+function fgSaveHint(verb) {
+  return '<span class="mr-auto hidden items-center gap-1 text-xs text-zinc-400 sm:inline-flex dark:text-zinc-500"><kbd class="' + CX.kbd + '">' + fgModKey() + '</kbd><kbd class="' + CX.kbd + '">↵</kbd> para ' + esc(verb || 'guardar') + '</span>';
+}
+function fgPilarKey(k) { const p = k ? PIL(k) : null; return p ? p.key : ''; }
+// v3 (SPEC §13.1): avisar por defecto true; privada por defecto false (bundles viejos sin el campo incluidos)
+function fgAvisar(t) { return !!t && t.avisar !== false; }
+function fgPrivada(t) { return !!t && t.privada === true; }
+// Correo con el que el servidor identifica a quien mira ('' si Google no lo entregó)
+function fgServerMe() { return S && S.me && S.me.email && S.me.email !== 'desconocido' ? S.me.email : ''; }
+// Por qué no se puede cambiar la privacidad ('' = sí se puede): sin cuenta identificada, una tarea privada no la vería
+// ni quien la crea (el servidor la rechaza); en una ajena, sólo quien la creó o su responsable (otro la perdería de vista).
+const FG_MULTI_PUBLIC = 'Con varias personas, la tarea es del equipo (pública)';
+function fgPrivacyBlock(t) {
+  const me = fgServerMe();
+  if (!me) return 'No pude identificar tu cuenta de Google: por ahora las tareas quedan compartidas';
+  if (!t || !t.id) return '';
+  if ((t.asignados || []).length) return FG_MULTI_PUBLIC;
+  return !t.creadoPor || t.creadoPor === 'desconocido' || t.creadoPor === me || t.resp === me ? '' : 'Sólo quien la creó o su responsable pueden cambiarlo';
+}
+function fgCanPrivacy(t) { return !fgPrivacyBlock(t); }
+// "y" → "e" antes de un sonido /i/ (tú e Ina, tú e Ignacio)
+function fgAnd(a, b) { return a + (/^h?[iíÍI](?![aeouáéó])/i.test(String(b)) ? ' e ' : ' y ') + b; }
+// Quién ve una tarea privada, contado desde quien mira
+function fgWhoSees(t, priv, resp) {
+  if (!priv) return 'Todo el equipo la ve en la app';
+  const me = myEmail();
+  const ppl = [(t && t.creadoPor && t.creadoPor !== 'desconocido') ? t.creadoPor : me, resp].filter(Boolean).filter((x, i, a) => a.indexOf(x) === i);
+  const names = ppl.map(e => e === me ? 'tú' : userName(e)).sort((a, b) => (a === 'tú' ? -1 : b === 'tú' ? 1 : 0));
+  if (!names.length || (names.length === 1 && names[0] === 'tú')) return 'Sólo tú la ves en la app';
+  if (names.length === 1) return 'Sólo ' + names[0] + ' la ve en la app';
+  return 'Sólo ' + fgAnd(names[0], names[1]) + ' la ven en la app';
+}
+function fgSoftChip(text, toneKey, iconName, title) {
+  return '<span class="inline-flex min-w-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 font-medium ' + (FG_SOFT[toneKey] || FG_SOFT.zinc) + '"' +
+    (title ? ' title="' + esc(title) + '"' : '') + '>' + (iconName ? icon(iconName, 'size-3 shrink-0') : '') + esc(text) + '</span>';
+}
+function fgPillarChip(k) {
+  const p = PIL(k);
+  if (!p) return '';
+  return '<span class="inline-flex min-w-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 font-medium ' + p.tone.soft + '" title="' + esc(p.label) + '">' +
+    icon(p.icon, 'size-3 shrink-0') + '<span class="truncate">' + esc(p.label) + '</span></span>';
+}
+// "Hoy" · "Mañana" · "Ayer" · "Vie 9 oct" (+ año si no es el actual)
+function fgDayLabel(s) {
+  const d = daysUntil(s);
+  if (d === 0) return 'Hoy';
+  if (d === 1) return 'Mañana';
+  if (d === -1) return 'Ayer';
+  const dt = parseYmd(s);
+  if (!dt) return '';
+  const wd = FG_DIAS[dt.getDay()];
+  return wd.charAt(0).toUpperCase() + wd.slice(1) + ' ' + dt.getDate() + ' ' + MESES[dt.getMonth()] +
+    (dt.getFullYear() !== new Date().getFullYear() ? ' ' + dt.getFullYear() : '');
+}
+// Próximo día de la semana (0 = domingo … 6 = sábado), siempre después de hoy
+function fgNextDow(dow) {
+  const n = new Date().getDay();
+  return addDays(todayStr(), ((dow - n + 7) % 7) || 7);
+}
+// "1 oct → 31 dic 2026" · "Desde el 1 oct 2026" · "Hasta el 31 dic 2026"
+function fgRange(a, b) {
+  if (a && b) return (a.slice(0, 4) === b.slice(0, 4) ? fmtDateShort(a) : fmtDate(a)) + ' → ' + fmtDate(b);
+  if (a) return 'Desde el ' + fmtDate(a);
+  if (b) return 'Hasta el ' + fmtDate(b);
+  return '';
+}
+function fgAutoGrow(ta) {
+  if (!ta || ta.hidden) return;
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight + 2, 320) + 'px';
+}
+// Indicador que heredan las tareas nuevas del proyecto: sólo un indicador (no un grupo, que el servidor rechaza en tareas).
+function fgProjCascade(p) {
+  const c = p && p.cascade ? IDX.cascade.get(p.cascade) : null;
+  return c && c.padre ? c.id : '';
+}
+// Pilar por defecto: el indicado → el del proyecto → el de la ruta actual → el primero.
+function fgDefaultPilar(given, projId) {
+  if (fgPilarKey(given)) return fgPilarKey(given);
+  const p = projId ? IDX.project.get(projId) : null;
+  if (p && fgPilarKey(p.pilar)) return fgPilarKey(p.pilar);
+  const rp = S.route && S.route.params ? S.route.params.pilar : '';
+  if (fgPilarKey(rp)) return fgPilarKey(rp);
+  return (S.pillars[0] || {}).key || '';
+}
+function fgPillarBox(k, iconName, cls) {
+  const p = PIL(k);
+  return '<div class="grid ' + (cls || 'size-10') + ' shrink-0 place-items-center rounded-xl ring-1 ring-inset ring-black/5 dark:ring-white/5 ' + (p ? p.tone.iconbox : tone('zinc').iconbox) + '">' + icon(iconName, 'size-5') + '</div>';
+}
+function fgEstadoBadge(e) {
+  const m = FG_ESTADOS.find(x => x.value === (e || 'Activo'));
+  return m ? badge(m.value, m.tone, m.icon) : badge(e, 'zinc');
+}
+function fgLineEstadoBadge(e) {
+  if (!e) return '';
+  const m = FG_LINE_ESTADO[e];
+  return badge(e, m ? m[0] : 'zinc', m ? m[1] : null);
+}
+function fgRelDays(s) {
+  const d = daysUntil(s);
+  if (d == null) return '';
+  if (d === 0) return 'hoy';
+  if (d === 1) return 'mañana';
+  if (d === -1) return 'ayer';
+  return d > 0 ? 'en ' + d + ' días' : 'hace ' + (-d) + ' días';
+}
+function fgWeekday(s) {
+  const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? FG_DIAS[new Date(+m[1], +m[2] - 1, +m[3]).getDay()] : '';
+}
+function fgWhen(iso) { const r = fmtRel(iso); return /^\d/.test(r) ? 'el ' + r : r; }
+function fgCleanEv(list) {
+  return (Array.isArray(list) ? list : [])
+    .map(e => ({ t: String((e && e.t) || '').trim(), u: safeUrl(e && e.u) }))
+    .filter(e => e.u)
+    .map(e => ({ t: e.t || shortUrl(e.u), u: e.u }));
+}
+function fgBusy(b, on, label) {
+  if (!b) return;
+  if (on) {
+    if (b.dataset.idle == null) b.dataset.idle = b.innerHTML;
+    b.disabled = true;
+    b.innerHTML = icon('loader-circle', 'size-4 shrink-0 animate-spin') + '<span>' + esc(label || 'Guardando…') + '</span>';
+    refreshIcons(b);
+  } else {
+    if (b.dataset.idle != null) { b.innerHTML = b.dataset.idle; delete b.dataset.idle; }
+    b.disabled = false;
+  }
+}
+// Marca un campo como inválido (anillo rojo + mensaje). Siempre devuelve false.
+function fgInvalid(input, msg) {
+  if (!input) { toast(msg, 'error'); return false; }
+  input.style.setProperty('--tw-ring-color', FG_RED);
+  input.setAttribute('aria-invalid', 'true');
+  let p = input.nextElementSibling;
+  if (!p || !p.hasAttribute('data-fg-err')) {
+    input.insertAdjacentHTML('afterend', '<p data-fg-err role="alert" class="mt-1 text-xs font-medium text-red-600 dark:text-red-400"></p>');
+    p = input.nextElementSibling;
+  }
+  p.textContent = msg;
+  input.focus();
+  if (input.scrollIntoView) input.scrollIntoView({ block: 'nearest' });
+  const clear = () => { fgClearInvalid(input); input.removeEventListener('input', clear); };
+  input.addEventListener('input', clear);
+  return false;
+}
+function fgClearInvalid(input) {
+  input.style.removeProperty('--tw-ring-color');
+  input.removeAttribute('aria-invalid');
+  const p = input.nextElementSibling;
+  if (p && p.hasAttribute('data-fg-err')) p.remove();
+}
+// Guardar con el botón [data-fg-save], ⌘/Ctrl+Enter o Enter en el campo "nombre".
+function fgWireForm(el, save) {
+  const b = el.querySelector('[data-fg-save]');
+  const go2 = () => { if (b && !b.disabled) save(b); };
+  if (b) b.addEventListener('click', go2);
+  el.addEventListener('keydown', ev => {
+    if (ev.key !== 'Enter' || ev.isComposing) return;
+    const t = ev.target;
+    if (ev.metaKey || ev.ctrlKey || (!ev.shiftKey && t && t.matches && t.matches('input[name="nombre"]'))) { ev.preventDefault(); go2(); }
+  });
+}
+
+/* ---------- Navegación entre drawers (volver) ---------- */
+function fgPushNav(key) {
+  const st = FG_STATE.stack;
+  const cur = currentDrawerKey();
+  if (!cur || !/^(project|task):/.test(cur)) { st.length = 0; return null; }
+  if (cur === key) return null;
+  const top = st[st.length - 1];
+  if (top && top.key === key) return st.pop();
+  st.push({ key: cur, tab: cur.indexOf('project:') === 0 ? fgUi().projectTab : '' });
+  if (st.length > 12) st.shift();
+  return null;
+}
+function fgOpenEntry(e) {
+  if (!e) return false;
+  const i = e.key.indexOf(':'), type = e.key.slice(0, i), id = e.key.slice(i + 1);
+  if (type === 'project' && IDX.project.get(id)) { openProject(id, { noHistory: true, tab: e.tab }); return true; }
+  if (type === 'task' && IDX.task.get(id)) { openTask(id, { noHistory: true }); return true; }
+  return false;
+}
+function fgBackBtn() {
+  const prev = FG_STATE.stack[FG_STATE.stack.length - 1];
+  if (!prev) return '';
+  const i = prev.key.indexOf(':'), type = prev.key.slice(0, i), id = prev.key.slice(i + 1);
+  const ent = type === 'project' ? IDX.project.get(id) : IDX.task.get(id);
+  return iconBtn({ icon: 'arrow-left', action: 'project.back', title: 'Volver' + (ent ? ' a «' + fgClip(ent.nombre, 40) + '»' : ''), cls: '-ml-2' });
+}
+// Tras eliminar algo abierto: vuelve al drawer anterior si existe.
+function fgAfterDelete() {
+  while (FG_STATE.stack.length) { if (fgOpenEntry(FG_STATE.stack.pop())) return; }
+}
+
+/* =====================================================================
+   taskRow(task, {showProject, showPillar, showCascade, showResp, lead, trail, attrs, cls}) → fila de lista
+   v3.1 (§14.4): sólo título + vencimiento + avatar (+ candado si es privada). Proyecto / pilar / indicador
+   sólo si quien llama lo pide (donde el contexto no lo dice ya). Check animado (checkButton de Core,
+   acción task.toggle), data-task-row y título .task-title (tachado suave al completar).
+   lead / trail / attrs: HTML extra (ya escapado por quien llama), p. ej. un asa para arrastrar.
+   ===================================================================== */
+function fgCheck(t, size) {
+  if (typeof checkButton === 'function') return checkButton(t, { size: size || 'md', action: 'task.toggle' });
+  // Respaldo si Core aún no trae checkButton
+  const done = t.estado === 'Realizada';
+  const lbl = done ? 'Marcar como pendiente' : 'Marcar como realizada';
+  return '<button type="button" data-action="task.toggle" data-id="' + esc(t.id) + '" aria-pressed="' + done + '" title="' + lbl + '" aria-label="' + lbl + '" class="grid size-5 shrink-0 place-items-center rounded-full border-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 ' +
+    (done ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-zinc-300 hover:border-emerald-500 dark:border-zinc-600') + '">' + (done ? icon('check', 'size-3 stroke-[3]') : '') + '</button>';
+}
+function fgDueChip(t) {
+  const i = dueInfo(t);
+  if (i.key === 'nodate' || i.key === 'done') return '';
+  const tn = i.key === 'overdue' ? 'red' : (i.key === 'today' || i.key === 'soon') ? 'amber' : 'zinc';
+  return fgSoftChip(i.label, tn, i.icon, fgWeekday(t.fecha) + ' ' + fmtDate(t.fecha));
+}
+function fgCascadeChip(id) {
+  const it = IDX.cascade.get(id);
+  if (!it) return '';
+  const m = CLASE_META[it.clase] || CLASE_META.accion;
+  const g = it.padre ? IDX.cascade.get(it.padre) : null;
+  // El grupo se recorta primero: el indicador (lo específico) siempre queda visible.
+  return '<span class="inline-flex min-w-0 max-w-[17rem] items-center gap-1 rounded-md bg-zinc-100 px-1.5 py-0.5 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300" title="' + esc(m.label + ' · ' + cascadeLabel(id)) + '">' +
+    icon(m.icon, 'size-3 shrink-0 ' + tone(m.tone).text) +
+    (g ? '<span class="min-w-0 max-w-[6.5rem] truncate text-zinc-400 dark:text-zinc-500">' + esc(g.nombre) + '</span><span class="shrink-0 text-zinc-400 dark:text-zinc-500" aria-hidden="true">›</span>' : '') +
+    '<span class="min-w-0 truncate">' + esc(it.nombre) + '</span></span>';
+}
+function taskRow(t, opts) {
+  if (!t) return '';
+  opts = opts || {};
+  const done = t.estado === 'Realizada';
+  const meta = [];
+  if (done) {
+    meta.push('<span class="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">' + icon('check', 'size-3 shrink-0') +
+      'Lista' + (t.completada ? ' el ' + esc(fmtDateShort(t.completada)) : '') + '</span>');
+  } else {
+    const dc = fgDueChip(t);
+    if (dc) meta.push(dc);
+  }
+  // Sólo el avatar (su title lleva el nombre)
+  if (opts.showResp !== false) meta.push('<span class="inline-flex items-center">' + avatarStack(taskPeople(t), 'xs', 3) + '</span>');
+  if (opts.showProject && t.proyecto) {
+    const p = IDX.project.get(t.proyecto);
+    if (p) {
+      const pl = PIL(p.pilar);
+      meta.push('<button type="button" data-action="project.open" data-id="' + esc(p.id) + '" title="Abrir proyecto: ' + esc(p.nombre) + '" class="inline-flex min-w-0 max-w-[14rem] items-center gap-1 rounded-md px-1 py-0.5 text-zinc-600 transition hover:bg-zinc-200/70 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-300 dark:hover:bg-zinc-700/60 dark:hover:text-white">' +
+        icon('folder-kanban', 'size-3 shrink-0 ' + (pl ? pl.tone.text : 'text-zinc-400')) + '<span class="truncate">' + esc(p.nombre) + '</span></button>');
+    }
+  }
+  if (opts.showPillar && t.pilar) meta.push(fgPillarChip(t.pilar));
+  if (opts.showCascade && t.cascade && IDX.cascade.get(t.cascade)) meta.push(fgCascadeChip(t.cascade));
+  if (fgPrivada(t)) meta.push('<span class="inline-flex items-center text-zinc-400 dark:text-zinc-500" title="Privada: sólo quien la creó y su responsable la ven en la app">' + icon('lock', 'size-3.5') + '<span class="sr-only">Privada</span></span>');
+  return '<div data-task-row data-id="' + esc(t.id) + '" data-action="task.open" class="group/row flex cursor-pointer items-start gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-zinc-100/70 dark:hover:bg-zinc-800/50' + (opts.cls ? ' ' + opts.cls : '') + '"' + (opts.attrs ? ' ' + opts.attrs : '') + '>' +
+    (opts.lead || '') +
+    '<span class="flex shrink-0">' + fgCheck(t) + '</span>' +
+    '<div class="min-w-0 flex-1">' +
+    '<button type="button" data-action="task.open" data-id="' + esc(t.id) + '" class="block max-w-full rounded text-left text-sm font-medium leading-snug transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 ' +
+    (done ? 'text-zinc-400 line-through decoration-zinc-300 dark:text-zinc-500 dark:decoration-zinc-600' : 'text-zinc-900 group-hover/row:text-zinc-950 dark:text-zinc-100 dark:group-hover/row:text-white') + '">' +
+    '<span class="line-clamp-2 break-words"><span class="task-title">' + esc(t.nombre || 'Tarea sin nombre') + '</span></span></button>' +
+    (meta.length ? '<div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400">' + meta.join('') + '</div>' : '') +
+    '</div>' + (opts.trail || '') + '</div>';
+}
+
+/* =====================================================================
+   Drawer de proyecto
+   ===================================================================== */
+function openProject(id, opts) {
+  opts = opts || {};
+  if (!fgReady() || !IDX.project.get(id)) { toast('No se encontró el proyecto', 'error'); return; }
+  const key = 'project:' + id;
+  const ui = fgUi();
+  const popped = opts.noHistory ? null : fgPushNav(key);
+  const same = currentDrawerKey() === key;
+  if (opts.tab) ui.projectTab = opts.tab;
+  else if (popped && popped.tab) ui.projectTab = popped.tab;
+  else if (!same) ui.projectTab = 'resumen';
+  if (!same) ui.showDone = false;
+  openDrawer({ key: key, width: 'lg', render: () => fgProjectDrawer(id), onMount: el => { fgDriveInstallDrop(); fgTabIntoView(el); } });
+}
+// En móvil la tira de pestañas se desplaza: la pestaña activa (p. ej. Drive) siempre queda a la vista
+function fgTabIntoView(el) {
+  const on = el && el.querySelector ? el.querySelector('[role="tab"][aria-selected="true"]') : null;
+  const bar = on ? on.parentElement : null;
+  if (!bar || bar.scrollWidth <= bar.clientWidth) return;
+  const r = on.getBoundingClientRect(), b = bar.getBoundingClientRect();
+  if (r.left < b.left || r.right > b.right) bar.scrollLeft = Math.max(0, bar.scrollLeft + r.left - b.left - 16);
+}
+function fgProjectDrawer(id) {
+  const p = IDX.project.get(id);
+  if (!p) return null;
+  const ui = fgUi();
+  const st = projectStats(p);
+  const nCom = (IDX.commentsByRef.get(p.id) || []).length;
+  const tab = FG_TABS.indexOf(ui.projectTab) >= 0 ? ui.projectTab : 'resumen';
+  const anim = FG_STATE.animTab; FG_STATE.animTab = false;
+  let content;
+  if (tab === 'tareas') content = fgProjectTasks(p);
+  else if (tab === 'presupuesto') content = fgProjectBudget(p, st);
+  else if (tab === 'comentarios') content = commentsPanel(p.id);
+  else if (tab === 'drive' && fgDriveOn()) { fgDriveEnsure(p.id); content = fgDrivePanel(p); }
+  else content = fgProjectSummary(p, st);
+  const range = fgRange(p.inicio || '', p.fin || '');
+  // Sin ruido: «Activo» es lo normal (sólo se marca En pausa / Cerrado) y el año sólo si el proyecto tiene uno.
+  const subtitle = pillarBadge(p.pilar) + (p.estado && p.estado !== 'Activo' ? fgEstadoBadge(p.estado) : '') +
+    '<span class="inline-flex min-w-0 items-center gap-1.5">' + avatar(p.resp, 'xs') + '<span class="truncate">' + esc(userName(p.resp)) + '</span></span>' +
+    (range
+      ? '<span class="inline-flex items-center gap-1 tabular-nums" title="Plazo">' + icon('calendar-range', 'size-3.5') + esc(range) + '</span>'
+      : p.anio ? '<span class="inline-flex items-center gap-1 tabular-nums">' + icon('calendar', 'size-3.5') + esc(String(p.anio)) + '</span>' : '');
+  return {
+    title: p.nombre || 'Proyecto sin nombre',
+    iconHtml: '<div class="flex shrink-0 items-center gap-1">' + fgBackBtn() + fgPillarBox(p.pilar, 'folder-kanban') + '</div>',
+    subtitle: subtitle,
+    headerRight: iconBtn({ icon: 'pencil', action: 'project.edit', data: { id: p.id }, title: 'Editar proyecto' }),
+    body: '<div class="sticky -top-5 z-10 -mx-5 -mt-5 mb-5 bg-white/95 px-5 pt-1 backdrop-blur-sm dark:bg-zinc-900/95">' +
+      tabs({ value: tab, action: 'project.tab', data: { id: p.id }, options: [
+        { value: 'resumen', label: 'Resumen' },
+        { value: 'tareas', label: 'Tareas', count: st.pending || null },
+        { value: 'presupuesto', label: 'Presupuesto', count: st.lines.length || null },
+        { value: 'comentarios', label: 'Comentarios', count: nCom || null },
+      ].concat(fgDriveOn() ? [{ value: 'drive', label: 'Drive', icon: 'hard-drive' }] : []) }) + '</div>' +
+      '<div role="tabpanel" class="' + (anim ? 'anim-fade-in' : '') + '">' + content + '</div>',
+    footer: fgRBtn({ label: 'Eliminar', icon: 'trash', variant: 'danger-ghost', action: 'project.delete', data: { id: p.id }, title: 'Eliminar proyecto', cls: 'mr-auto' }) +
+      fgRBtn({ label: 'Editar', icon: 'pencil', variant: 'secondary', action: 'project.edit', data: { id: p.id }, title: 'Editar proyecto' }) +
+      // Un proyecto cerrado no admite tareas nuevas (SPEC §7): no se ofrece el botón.
+      (p.estado === 'Cerrado' ? '' : btn({ label: 'Nueva tarea', icon: 'plus', variant: 'primary', action: 'task.new', data: { proyecto: p.id, pilar: p.pilar } })),
+  };
+}
+function fgTile(label, iconName, inner) {
+  return '<div class="min-w-0 rounded-xl border border-zinc-200/80 bg-zinc-50/60 p-3.5 dark:border-zinc-800 dark:bg-zinc-800/30">' +
+    '<div class="flex items-center gap-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400">' + icon(iconName, 'size-3.5 shrink-0') + '<span class="truncate">' + esc(label) + '</span></div>' +
+    '<div class="mt-2">' + inner + '</div></div>';
+}
+function fgCascadeDetail(id, emptyText) {
+  const it = id ? IDX.cascade.get(id) : null;
+  if (!it) return '<p class="text-sm text-zinc-400 dark:text-zinc-500">' + esc(emptyText || 'Sin indicador') + '</p>';
+  const m = CLASE_META[it.clase] || CLASE_META.accion;
+  const g = it.padre ? IDX.cascade.get(it.padre) : null;
+  return '<div class="flex min-w-0 items-start gap-2.5">' +
+    '<span class="grid size-8 shrink-0 place-items-center rounded-lg ' + tone(m.tone).iconbox + '">' + icon(m.icon, 'size-4') + '</span>' +
+    '<div class="min-w-0">' + (g ? '<p class="text-xs text-zinc-500 dark:text-zinc-400">' + esc(g.nombre) + ' ›</p>' : '') +
+    '<p class="break-words text-sm font-medium text-zinc-900 dark:text-zinc-100">' + esc(it.nombre) + '</p>' +
+    '<div class="mt-1 flex flex-wrap gap-1">' + badge(m.label, m.tone) + '</div></div></div>';
+}
+// Plazo del proyecto: el rango ya va en el encabezado; aquí sólo el avance del tiempo (con inicio y término).
+function fgPlazoHtml(p) {
+  const a = p.inicio || '', b = p.fin || '';
+  if (!a || !b || b < a) return '';
+  const da = daysUntil(a), db = daysUntil(b);
+  const sub = da > 0 ? (da === 1 ? 'Empieza mañana' : 'Empieza en ' + da + ' días')
+    : db > 0 ? (db === 1 ? 'Queda 1 día' : 'Quedan ' + db + ' días')
+    : db === 0 ? 'Termina hoy' : 'Terminó ' + fgRelDays(b);
+  return fgSection('Plazo', '<div class="flex items-center gap-3">' + progress(pct(-da, db - da), 'indigo', 'flex-1') +
+    '<span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">' + esc(sub) + '</span></div>');
+}
+function fgProjectSummary(p, st) {
+  const pctT = pct(st.done, st.tasks);
+  const tiles = [];
+  tiles.push(fgTile('Tareas', 'list-checks', st.tasks
+    ? '<div class="flex items-baseline gap-1.5" title="' + esc(st.done + ' de ' + plural(st.tasks, 'tarea lista', 'tareas listas')) + '"><span class="text-xl font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-white">' + st.done +
+      '<span class="text-zinc-400 dark:text-zinc-500">/' + st.tasks + '</span></span></div>' +
+      progress(pctT, 'emerald', 'mt-2') +
+      (st.overdue ? '<p class="mt-2 truncate text-xs font-medium text-red-600 dark:text-red-400">' + plural(st.overdue, 'atrasada', 'atrasadas') + '</p>' : '')
+    : fgLinkBtn('Agregar', 'project.tab', { id: p.id, value: 'tareas' }, true)));
+  const nt = st.nextTask;
+  if (nt) {
+    tiles.push(fgTile('Próximo vencimiento', 'calendar-clock',
+      '<button type="button" data-action="task.open" data-id="' + esc(nt.id) + '" class="block w-full rounded text-left text-sm font-medium text-zinc-900 transition hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-100 dark:hover:text-indigo-400"><span class="line-clamp-2 break-words">' + esc(nt.nombre) + '</span></button>' +
+      '<div class="mt-2">' + fgDueChip(nt) + '</div>'));
+  }
+  tiles.push(fgTile('Presupuesto', 'wallet', st.lines.length
+    ? '<div class="flex flex-wrap items-baseline gap-x-1.5"><span class="text-xl font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-white">' + esc(fmtCompact(st.pg)) + '</span>' +
+      '<span class="text-xs text-zinc-500 dark:text-zinc-400">pagado de ' + esc(fmtCompact(st.pf)) + '</span></div>' +
+      progress(pct(st.pg, st.pf), 'sky', 'mt-2')
+    : fgLinkBtn('Vincular líneas', 'project.link', { id: p.id }, true)));
+
+  const desc = p.detalle
+    ? '<div class="whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-700 dark:text-zinc-300">' + linkify(p.detalle) + '</div>'
+    : '';
+
+  const own = fgCleanEv(p.evidencias);
+  const fromTasks = (IDX.tasksByProject.get(p.id) || []).slice().sort(fgByDue)
+    .map(t => ({ t: t, ev: fgCleanEv(t.evidencias) })).filter(x => x.ev.length);
+  let evHtml = '';
+  if (own.length) evHtml += '<div class="flex flex-wrap gap-2">' + own.map(e => evidenceChip(e)).join('') + '</div>';
+  if (fromTasks.length) {
+    evHtml += '<div class="' + (own.length ? 'mt-4 ' : '') + 'rounded-xl border border-dashed border-zinc-200 p-3 dark:border-zinc-800">' +
+      '<p class="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">De tareas</p><div class="space-y-3">' +
+      fromTasks.map(x => '<div class="min-w-0"><button type="button" data-action="task.open" data-id="' + esc(x.t.id) + '" class="mb-1.5 flex max-w-full items-center gap-1.5 rounded text-left text-xs text-zinc-500 transition hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:text-indigo-400">' +
+        icon(x.t.estado === 'Realizada' ? 'circle-check' : 'circle', 'size-3 shrink-0') + '<span class="truncate">' + esc(x.t.nombre) + '</span></button>' +
+        '<div class="flex flex-wrap gap-2">' + x.ev.map(e => evidenceChip(e)).join('') + '</div></div>').join('') + '</div></div>';
+  }
+
+  // Una sola línea discreta: quién lo creó y cuándo (la última edición va en el title)
+  const upd = p.actualizado && p.actualizado !== p.creado
+    ? 'Actualizado ' + fgWhen(p.actualizado) + (p.actualizadoPor ? ' por ' + userName(p.actualizadoPor) : '') : '';
+  const meta = p.creado
+    ? '<p class="border-t border-zinc-100 pt-4 text-xs text-zinc-400 dark:border-zinc-800 dark:text-zinc-500" title="' + esc(fmtDateTime(p.creado) + (upd ? ' · ' + upd : '')) + '">' +
+      'Creado' + (p.creadoPor ? ' por ' + esc(userName(p.creadoPor)) : '') + ' ' + esc(fgWhen(p.creado)) + '</p>'
+    : '';
+
+  // Secciones vacías no se muestran (se completan con «Editar»)
+  return '<div class="space-y-7">' +
+    (desc ? fgSection('Descripción', desc) : '') +
+    fgPlazoHtml(p) +
+    '<div class="grid grid-cols-1 gap-3 ' + (tiles.length === 3 ? 'sm:grid-cols-3' : 'sm:grid-cols-2') + '">' + tiles.join('') + '</div>' +
+    (p.cascade && IDX.cascade.get(p.cascade) ? fgSection('Indicador Cascade', fgCascadeDetail(p.cascade)) : '') +
+    (evHtml ? fgSection('Evidencias', evHtml) : '') +
+    meta +
+    '</div>';
+}
+function fgProjectTasks(p) {
+  const ui = fgUi();
+  const all = IDX.tasksByProject.get(p.id) || [];
+  // Altas rápidas aún sin confirmar: se ven al instante (atenuadas) en el lugar donde quedarán
+  const temps = FG_STATE.qa.filter(x => x.proyecto === p.id);
+  const pend = all.filter(t => t.estado !== 'Realizada').concat(temps).sort(fgByDue);
+  const done = all.filter(t => t.estado === 'Realizada').sort(fgByDoneDesc);
+  const row = t => taskRow(t, fgIsTmp(t) ? { cls: 'opacity-60', attrs: 'aria-busy="true"' } : {});
+  const closed = p.estado === 'Cerrado';
+  // Proyecto cerrado: el servidor rechaza tareas nuevas (SPEC §7), así que en vez del alta rápida se ofrece reabrirlo.
+  // Abierto: alta rápida (Enter → ¿para cuándo?); «Nueva tarea» del pie abre el compositor completo.
+  const qa = closed
+    ? '<div class="flex items-center gap-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-800/40 dark:text-zinc-300">' +
+      icon('circle-check', 'size-4 shrink-0 text-zinc-500 dark:text-zinc-400') + '<span class="min-w-0 flex-1 font-medium">Proyecto cerrado</span>' +
+      btn({ label: 'Reabrir', icon: 'rotate-ccw', variant: 'secondary', size: 'sm', action: 'project.reopen', data: { id: p.id }, title: 'Reabrir proyecto' }) + '</div>'
+    : '<div class="relative"><span class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-zinc-400">' + icon('plus', 'size-4') + '</span>' +
+      '<input id="fg-qa-' + esc(p.id) + '" type="text" data-enter="project.quickadd" data-id="' + esc(p.id) + '" maxlength="300" autocomplete="off" enterkeyhint="done" placeholder="Agregar una tarea…" aria-label="Agregar tarea rápida (Enter y eliges la fecha)" class="' + CX.input + ' pl-9"></div>';
+  let list = '';
+  if (pend.length) list += '<div class="-mx-2 space-y-0.5">' + pend.map(row).join('') + '</div>';
+  if (done.length) {
+    list += '<div class="' + (pend.length ? 'mt-6' : '') + '"><button type="button" data-action="project.toggledone" aria-expanded="' + (ui.showDone ? 'true' : 'false') + '" class="flex items-center gap-1.5 rounded text-[11px] font-semibold uppercase tracking-wider text-zinc-500 transition hover:text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:text-zinc-200">' +
+      icon(ui.showDone ? 'chevron-down' : 'chevron-right', 'size-3.5') + 'Realizadas <span class="rounded-full bg-zinc-100 px-1.5 text-[10px] font-medium tabular-nums tracking-normal text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">' + done.length + '</span></button>' +
+      (ui.showDone ? '<div class="-mx-2 mt-1.5 space-y-0.5 anim-fade-in">' + done.map(row).join('') + '</div>' : '') + '</div>';
+  }
+  return qa + (list ? '<div class="mt-4">' + list + '</div>' : '');
+}
+function fgIsTmp(t) { return /^tmp-/i.test(String((t && t.id) || '')); }
+function fgAmt(label, v, cls) {
+  return '<div class="min-w-0"><div class="text-[11px] text-zinc-500 dark:text-zinc-400">' + esc(label) + '</div>' +
+    '<div class="truncate font-medium text-zinc-900 dark:text-zinc-100 ' + (cls || '') + '" title="' + esc(fmtMoney(v)) + '">' + esc(fmtMoney(v)) + '</div></div>';
+}
+function fgProjectBudget(p, st) {
+  const lines = st.lines.slice().sort((a, b) => (b.year - a.year) || fgCmpStr(a.proj, b.proj));
+  if (!lines.length) {
+    return emptyState({ icon: 'wallet', title: 'Sin líneas vinculadas',
+      actionHtml: btn({ label: 'Vincular líneas', icon: 'link', variant: 'primary', action: 'project.link', data: { id: p.id } }) });
+  }
+  const head = '<div class="mb-3 flex justify-end">' +
+    btn({ label: 'Vincular líneas', icon: 'link', size: 'sm', variant: 'secondary', action: 'project.link', data: { id: p.id } }) + '</div>';
+  const rows = lines.map(l => '<div class="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">' +
+    '<div class="min-w-0 flex-1">' +
+    '<button type="button" data-action="project.openline" data-line="' + esc(l.id) + '" class="rounded text-left text-sm font-medium text-zinc-900 transition hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-100 dark:hover:text-indigo-400"><span class="line-clamp-2 break-words">' + esc(l.proj || 'Línea sin nombre') + '</span></button>' +
+    '<div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">' + badge(String(l.year), 'zinc', 'calendar') + (l.clas ? '<span>' + esc(l.clas) + '</span>' : '') + fgLineEstadoBadge(l.estado) + '</div></div>' +
+    '<div class="flex items-center gap-2 sm:shrink-0">' +
+    '<div class="grid flex-1 grid-cols-3 gap-3 text-xs tabular-nums sm:w-72 sm:flex-none sm:text-right">' +
+    fgAmt('Final', l.pf) + fgAmt('Pagado', l.pg) + fgAmt('Pendiente', l.pend, l.pend > 0 ? '!text-amber-700 dark:!text-amber-400' : '') + '</div>' +
+    '<div class="flex shrink-0 items-center">' +
+    iconBtn({ icon: 'arrow-up-right', action: 'project.openline', data: { line: l.id }, title: 'Ver línea de presupuesto' }) +
+    iconBtn({ icon: 'unlink', action: 'project.unlink', data: { id: p.id, line: l.id }, title: 'Desvincular línea' }) +
+    '</div></div></div>').join('');
+  const pp = pct(st.pg, st.pf);
+  const total = '<div class="flex flex-col gap-3 bg-zinc-50/80 px-4 py-3 sm:flex-row sm:items-center dark:bg-zinc-800/40">' +
+    '<div class="min-w-0 flex-1"><p class="text-sm font-semibold text-zinc-900 dark:text-white">Total</p>' +
+    '<div class="mt-1.5 flex items-center gap-2">' + progress(pp, 'sky', 'max-w-40') + '<span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">' + pp + '% pagado</span></div></div>' +
+    '<div class="flex items-center gap-2 sm:shrink-0"><div class="grid flex-1 grid-cols-3 gap-3 text-xs tabular-nums sm:w-72 sm:flex-none sm:text-right">' +
+    fgAmt('Final', st.pf) + fgAmt('Pagado', st.pg) + fgAmt('Pendiente', st.pend) + '</div><div class="hidden w-16 shrink-0 sm:block"></div></div></div>';
+  return head + '<div class="overflow-hidden rounded-xl border border-zinc-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-900"><div class="divide-y divide-zinc-100 dark:divide-zinc-800">' + rows + total + '</div></div>';
+}
+
+/* ---------- Modal: vincular líneas de presupuesto (SPEC §7) ---------- */
+function fgYearsAll() {
+  const set = {};
+  (S.years || []).forEach(y => { set[Number(y)] = 1; });
+  Object.keys(S.budget || {}).forEach(y => { if (/^\d{4}$/.test(y)) set[Number(y)] = 1; });
+  return Object.keys(set).map(Number);
+}
+function fgLinkRow(l, p, mine) {
+  const checked = mine.has(l.id);
+  const otherId = IDX.lineProject.get(l.id);
+  const other = otherId && otherId !== p.id ? IDX.project.get(otherId) : null;
+  let reason = '', disabled = false;
+  if (!checked && other) {
+    disabled = true;
+    reason = '<span class="inline-flex min-w-0 max-w-[16rem] items-center gap-1 rounded-md px-1.5 py-0.5 font-medium ring-1 ring-inset ' + tone('amber').soft + '">' + icon('folder-kanban', 'size-3 shrink-0') + '<span class="truncate">En: ' + esc(other.nombre) + '</span></span>';
+  } else if (!checked && !l.pf) {
+    disabled = true;
+    reason = badge('No se realizará', 'zinc', 'circle-x');
+  }
+  const q = normTxt([l.proj, l.clas, l.nota, l.year, userName(l.resp), l.estado, other ? other.nombre : ''].join(' '));
+  return '<label data-link-row data-q="' + esc(q) + '" class="flex items-start gap-3 rounded-lg px-2.5 py-2.5 transition ' +
+    (disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:bg-zinc-50 has-[:checked]:bg-indigo-50/70 dark:hover:bg-zinc-800/60 dark:has-[:checked]:bg-indigo-500/10') + '"' +
+    (disabled ? ' title="' + esc(other ? 'Ya está vinculada a «' + other.nombre + '»' : 'Línea con monto final $0 (no se realizará)') + '"' : '') + '>' +
+    '<input type="checkbox" name="lineas" data-multi="1" value="' + esc(l.id) + '" data-pf="' + (Number(l.pf) || 0) + '" class="mt-0.5 size-4 shrink-0 accent-indigo-600"' + (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + '>' +
+    '<div class="min-w-0 flex-1"><div class="flex items-start justify-between gap-3">' +
+    '<span class="min-w-0 text-sm font-medium text-zinc-900 dark:text-zinc-100"><span class="line-clamp-2 break-words">' + esc(l.proj || 'Línea sin nombre') + '</span></span>' +
+    '<span class="shrink-0 text-sm font-medium tabular-nums text-zinc-700 dark:text-zinc-200">' + esc(fmtMoney(l.pf)) + '</span></div>' +
+    '<div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">' +
+    (l.clas ? '<span>' + esc(l.clas) + '</span><span aria-hidden="true">·</span>' : '') +
+    '<span class="tabular-nums">Pagado ' + esc(fmtMoney(l.pg)) + '</span>' + (reason || fgLineEstadoBadge(l.estado)) + '</div></div></label>';
+}
+function fgOpenLinkLines(id) {
+  const p = IDX.project.get(id);
+  if (!p) { toast('No se encontró el proyecto', 'error'); return; }
+  const pil = PIL(p.pilar);
+  const pk = pil ? pil.key : p.pilar;
+  const mine = new Set(p.lineas || []);
+  const years = fgYearsAll().sort((a, b) => a === S.year ? -1 : b === S.year ? 1 : b - a);
+  const rendered = [];
+  let groups = '';
+  years.forEach(y => {
+    const lines = budgetLines(y).filter(l => l.pilar === pk).sort((a, b) => fgCmpStr(a.proj, b.proj));
+    if (!lines.length) return;
+    lines.forEach(l => rendered.push(l.id));
+    groups += '<div data-link-group>' +
+      '<div class="sticky top-0 z-[1] flex items-center justify-between gap-2 border-b border-zinc-100 bg-zinc-50/95 px-3 py-2 text-xs font-semibold text-zinc-600 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-800/95 dark:text-zinc-300">' +
+      '<span class="inline-flex items-center gap-1.5">' + icon('table', 'size-3.5') + 'Cuadre ' + y + '</span></div>' +
+      '<div class="p-1">' + lines.map(l => fgLinkRow(l, p, mine)).join('') + '</div></div>';
+  });
+  // Cada fila deshabilitada explica por qué (otro proyecto · monto $0); el pilar va en el buscador.
+  const body = '<div class="space-y-3">' +
+    (groups ? searchInput({ input: 'project.linksearch', placeholder: 'Buscar líneas de ' + (pil ? pil.label : 'este pilar') + '…', cls: 'w-full', id: 'fg-link-q' }) : '') +
+    '<div class="max-h-[52vh] overflow-y-auto overscroll-contain rounded-xl border border-zinc-200 dark:border-zinc-800">' +
+    (groups || emptyState({ icon: 'table', title: 'No hay líneas de ' + (pil ? pil.label : 'este pilar') })) +
+    '<p data-link-empty hidden class="px-4 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">Sin resultados para esa búsqueda.</p></div></div>';
+  openModal({
+    size: 'lg',
+    title: 'Vincular líneas de presupuesto',
+    subtitle: esc(p.nombre),
+    iconHtml: fgPillarBox(p.pilar, 'link'),
+    body: body,
+    footer: '<span data-link-sum class="mr-auto text-xs tabular-nums text-zinc-500 dark:text-zinc-400"></span>' +
+      btn({ label: 'Cancelar', variant: 'secondary', action: 'modal.close' }) +
+      btn({ label: 'Guardar vínculos', icon: 'check', variant: 'primary', attrs: 'data-fg-save' + (groups ? '' : ' disabled') }),
+    onMount: (el, close) => {
+      const sumEl = el.querySelector('[data-link-sum]');
+      const sum = () => {
+        const boxes = Array.prototype.slice.call(el.querySelectorAll('input[name="lineas"]:checked'));
+        const tot = boxes.reduce((a, b) => a + (Number(b.dataset.pf) || 0), 0);
+        sumEl.textContent = plural(boxes.length, 'línea seleccionada', 'líneas seleccionadas') + (boxes.length ? ' · ' + fmtMoney(tot) : '');
+      };
+      sum();
+      el.addEventListener('change', ev => { if (ev.target && ev.target.name === 'lineas') sum(); });
+      fgWireForm(el, b => {
+        const cur = IDX.project.get(p.id);
+        if (!cur) { toast('El proyecto ya no existe', 'error'); close(); return; }
+        const sel = Array.prototype.slice.call(el.querySelectorAll('input[name="lineas"]:checked')).map(x => x.value);
+        // Se conservan vínculos que no se mostraron (otro pilar) si la línea aún existe.
+        const keep = (cur.lineas || []).filter(x => rendered.indexOf(x) < 0 && IDX.line.has(x));
+        fgUi().projectTab = 'presupuesto';
+        // v3.4 (SPEC §18): se ve al tiro; el servidor confirma por detrás
+        const pay = fgProjectPayload(cur, { lineas: keep.concat(sel) });
+        close();
+        optimistic(() => { const x = IDX.project.get(p.id); if (x) x.lineas = pay.lineas.slice(); }, 'gSave', [pay], { reapply: true });
+        toast('Líneas vinculadas actualizadas', 'success');
+      });
+    },
+  });
+}
+// v3.4 (SPEC §18): sin control de versión (base): se prefiere la agilidad y el último cambio gana.
+function fgProjectPayload(p, over) {
+  const o = Object.assign({
+    tipo: 'Proyecto',
+    id: p.id || '',
+    pilar: fgPilarKey(p.pilar) || p.pilar || '',
+    nombre: p.nombre || '',
+    detalle: p.detalle || '',
+    resp: p.resp || '',
+    estado: p.estado || 'Activo',
+    anio: p.anio ? String(p.anio) : '',
+    lineas: (p.lineas || []).slice(),
+    cascade: p.cascade || '',
+    evidencias: fgCleanEv(p.evidencias),
+    inicio: p.inicio || '',
+    fin: p.fin || '',
+  }, over || {});
+  o.lineas = (o.lineas || []).filter(x => typeof x === 'string' && x).filter((x, i, a) => a.indexOf(x) === i);
+  delete o.base;
+  if (!o.id) delete o.id;
+  return o;
+}
+
+/* =====================================================================
+   Formulario de proyecto
+   ===================================================================== */
+function fgYearOptions(cur) {
+  const ys = fgYearsAll();
+  if (!ys.length) ys.push(new Date().getFullYear());
+  const max = Math.max.apply(null, ys);
+  if (ys.indexOf(max + 1) < 0) ys.push(max + 1);
+  if (cur && /^\d{4}$/.test(String(cur)) && ys.indexOf(Number(cur)) < 0) ys.push(Number(cur));
+  ys.sort((a, b) => a - b);
+  return [{ value: '', label: 'Todos los años' }].concat(ys.map(y => ({ value: String(y), label: String(y) })));
+}
+function openProjectForm(o) {
+  o = o || {};
+  if (!fgReady()) return;
+  const p = o.id ? IDX.project.get(o.id) : null;
+  if (o.id && !p) { toast('No se encontró el proyecto', 'error'); return; }
+  // Líneas sugeridas al crear (p. ej. desde Presupuesto): sólo las vinculables según SPEC §7.
+  const pre = p ? [] : (Array.isArray(o.lineas) ? o.lineas : []).map(x => IDX.line.get(x))
+    .filter(l => l && l.pf > 0 && !IDX.lineProject.get(l.id));
+  const pk = fgDefaultPilar(p ? p.pilar : (o.pilar || (pre[0] && pre[0].pilar)));
+  const nTasks = p ? (IDX.tasksByProject.get(p.id) || []).length : 0;
+  const lock = !!p && nTasks > 0;
+  const preHtml = pre.length
+    ? '<div class="sm:col-span-2">' + fgFieldLabel('Líneas de presupuesto a vincular') + '<div class="flex flex-wrap gap-2">' + pre.map(l =>
+      '<span class="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-200">' +
+      icon('wallet', 'size-3.5 shrink-0 text-zinc-400') + '<span class="truncate">' + esc(l.proj) + '</span><span class="shrink-0 tabular-nums text-zinc-500 dark:text-zinc-400">' + l.year + ' · ' + esc(fmtMoney(l.pf)) + '</span></span>').join('') +
+      '</div><p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Se vinculan sólo si el proyecto queda en el mismo pilar de la línea.</p></div>'
+    : '';
+  const body = '<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">' +
+    field({ name: 'nombre', label: 'Nombre del proyecto', required: true, value: p ? p.nombre : (pre.length === 1 ? pre[0].proj : ''), placeholder: 'Ej.: Piloto paneles solares en camiones', cls: 'sm:col-span-2', attrs: 'maxlength="200" autocomplete="off"' }) +
+    selectField({ name: 'pilar', label: 'Pilar', value: pk, options: S.pillars.map(x => ({ value: x.key, label: x.label })),
+      attrs: (lock ? 'disabled ' : '') + 'data-change="project.formpilar"',
+      hint: lock ? 'No se puede cambiar: el proyecto tiene ' + plural(nTasks, 'tarea', 'tareas') + '.' : '' }) +
+    userSelect({ name: 'resp', label: 'Responsable', value: p ? p.resp : (myEmail() || '') }) +
+    selectField({ name: 'estado', label: 'Estado', value: p ? (p.estado || 'Activo') : 'Activo', options: FG_ESTADOS.map(e => ({ value: e.value, label: e.value })) }) +
+    selectField({ name: 'anio', label: 'Año', value: p ? String(p.anio || '') : String(S.year || ''), options: fgYearOptions(p && p.anio) }) +
+    // Plazo opcional: alimenta la planificación (carta Gantt) del pilar
+    field({ name: 'inicio', label: 'Inicio (opcional)', type: 'date', value: p ? (p.inicio || '') : '' }) +
+    field({ name: 'fin', label: 'Término (opcional)', type: 'date', value: p ? (p.fin || '') : '' }) +
+    '<div class="sm:col-span-2">' + fgFieldLabel('Indicador Cascade (opcional)') +
+    cascadePickerHtml({ name: 'cascade', pilar: pk, value: p ? p.cascade : '' }) + '</div>' +
+    field({ name: 'detalle', label: 'Descripción (opcional)', type: 'textarea', rows: 3, value: p ? p.detalle : '', placeholder: '¿De qué se trata? Objetivo, alcance, acuerdos, links…', cls: 'sm:col-span-2', attrs: 'maxlength="8000"' }) +
+    // Al editar se pueden subir archivos a la carpeta del proyecto (Drive) y quedan como links
+    '<div class="sm:col-span-2">' + fgFieldLabel('Links y evidencias (opcional)') + evidenceEditorHtml('evidencias', p ? p.evidencias : [], { project: p ? p.id : '' }) + '</div>' +
+    preHtml +
+    '</div>';
+  openModal({
+    size: 'lg',
+    title: p ? 'Editar proyecto' : 'Nuevo proyecto',
+    subtitle: p ? esc(p.nombre) : '',
+    iconHtml: '<div class="grid size-10 shrink-0 place-items-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-black/5 dark:bg-indigo-500/15 dark:text-indigo-300 dark:ring-white/5">' + icon('folder-kanban', 'size-5') + '</div>',
+    body: body,
+    footer: fgSaveHint(p ? 'guardar' : 'crear') + btn({ label: 'Cancelar', variant: 'ghost', action: 'modal.close' }) +
+      btn({ label: p ? 'Guardar cambios' : 'Crear proyecto', icon: 'check', variant: 'primary', attrs: 'data-fg-save' }),
+    onMount: (el, close) => {
+      fgWireForm(el, b => {
+        const f = readForm(el);
+        const nombre = String(f.nombre || '').trim();
+        if (!nombre) { fgInvalid(el.querySelector('[name="nombre"]'), 'Ponle un nombre al proyecto'); return; }
+        const okDate = v => !v || /^\d{4}-\d{2}-\d{2}$/.test(v);
+        if (!okDate(f.inicio)) { fgInvalid(el.querySelector('[name="inicio"]'), 'Fecha no válida'); return; }
+        if (!okDate(f.fin)) { fgInvalid(el.querySelector('[name="fin"]'), 'Fecha no válida'); return; }
+        if (f.inicio && f.fin && f.fin < f.inicio) { fgInvalid(el.querySelector('[name="fin"]'), 'El término va después del inicio'); return; }
+        if (!fgCheckEvidence(el, 'evidencias')) return;
+        const cur = p ? (IDX.project.get(p.id) || p) : {};
+        const pil = lock ? cur.pilar : f.pilar;
+        const over = {
+          pilar: pil, nombre: nombre, detalle: f.detalle || '', resp: f.resp || '', estado: f.estado || 'Activo',
+          anio: f.anio || '', cascade: f.cascade || '', evidencias: readEvidence(el, 'evidencias'),
+          inicio: f.inicio || '', fin: f.fin || '',
+        };
+        if (p) {
+          // v3.4 (SPEC §18): al editar, la pantalla cambia al tiro y el servidor confirma por detrás
+          const pay = fgProjectPayload(cur, over);
+          close();
+          optimistic(() => { const x = IDX.project.get(p.id); if (x) Object.assign(x, over); }, 'gSave', [pay], { reapply: true });
+          toast('Proyecto actualizado', 'success');
+          return;
+        }
+        // Al crear se espera el id del servidor (luego se abre el proyecto nuevo)
+        const okLines = pre.filter(l => l.pilar === fgPilarKey(pil) && !IDX.lineProject.get(l.id));
+        over.lineas = okLines.map(l => l.id);
+        fgBusy(b, true);
+        mutate('gSave', [fgProjectPayload(cur, over)], { success: 'Proyecto creado' }).then(r => {
+          if (!r) { fgBusy(b, false); return; }
+          close();
+          if (okLines.length < pre.length) toast(plural(pre.length - okLines.length, 'línea no se vinculó', 'líneas no se vincularon') + ' por ser de otro pilar', 'info');
+          if (r.lastId && IDX.project.get(r.lastId)) openProject(r.lastId, okLines.length ? { tab: 'presupuesto' } : null);
+        });
+      });
+    },
+  });
+}
+
+/* =====================================================================
+   Drawer de tarea
+   ===================================================================== */
+function openTask(id, opts) {
+  if (/^tmp-/i.test(String(id || ''))) { toast('Guardando la tarea… un segundo', 'info'); return; }
+  opts = opts || {};
+  if (!fgReady() || !IDX.task.get(id)) { toast('No se encontró la tarea', 'error'); return; }
+  const key = 'task:' + id;
+  if (!opts.noHistory) fgPushNav(key);
+  openDrawer({ key: key, width: 'md', render: () => fgTaskDrawer(id) });
+}
+// Interruptor visual (el botón que lo contiene lleva role="switch"); data-on permite animarlo antes de redibujar
+function fgSwitch(on) {
+  return '<span data-fg-switch data-on="' + (on ? 'true' : 'false') + '" aria-hidden="true" class="group/sw relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-zinc-300 transition-colors duration-200 data-[on=true]:bg-indigo-600 dark:bg-zinc-600 dark:data-[on=true]:bg-indigo-500">' +
+    '<span class="ml-0.5 inline-block size-4 rounded-full bg-white shadow-sm ring-1 ring-black/5 transition-transform duration-200 group-data-[on=true]/sw:translate-x-4"></span></span>';
+}
+function fgFlagIcon(name, on) {
+  return '<span class="grid size-8 shrink-0 place-items-center rounded-lg transition-colors ' +
+    (on ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300' : 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400') + '">' + icon(name, 'size-4') + '</span>';
+}
+// Ajustes rápidos de la tarea: Avisarme (interruptor) y Compartida / Privada (segmentado). Cambian al instante.
+function fgTaskFlags(t) {
+  const done = t.estado === 'Realizada';
+  const me = myEmail();
+  const rows = [];
+  if (!done) {
+    const on = fgAvisar(t);
+    // Una línea corta: qué hace el interruptor, o por qué no llegaría el aviso (SPEC §17: un correo si vence)
+    const sub = !on ? '' : !t.resp ? 'Sin responsable: nadie recibe el aviso' : 'Un correo si pasa la fecha sin estar lista';
+    rows.push('<button type="button" role="switch" aria-checked="' + on + '" data-action="task.flag" data-id="' + esc(t.id) + '" data-key="avisar"' + (FG_STATE.busy[t.id] ? ' aria-busy="true"' : '') +
+      ' class="flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500/60 dark:hover:bg-zinc-800/50">' +
+      fgFlagIcon(on ? 'bell' : 'bell-off', on) +
+      '<span class="min-w-0 flex-1"><span class="block text-sm font-medium text-zinc-900 dark:text-zinc-100">' + (!t.resp || t.resp === me ? 'Avisarme si vence' : 'Avisar si vence') + '</span>' +
+      (sub ? '<span class="block text-xs text-zinc-500 dark:text-zinc-400">' + esc(sub) + '</span>' : '') + '</span>' + fgSwitch(on) + '</button>');
+  }
+  const priv = fgPrivada(t);
+  const block = fgPrivacyBlock(t);
+  const can = !block;
+  const seg = (val, label, ic, on) => '<button type="button" role="radio" aria-checked="' + on + '" data-action="task.flag" data-id="' + esc(t.id) + '" data-key="privada" data-value="' + val + '"' + (can ? '' : ' disabled') +
+    ' title="' + esc(can ? label : block) + '" aria-label="' + esc(label) + '"' +
+    ' class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 disabled:cursor-not-allowed disabled:opacity-60 ' +
+    (on ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-white' : 'text-zinc-500 hover:text-zinc-900 disabled:hover:text-zinc-500 dark:text-zinc-400 dark:hover:text-white') + '">' +
+    icon(ic, 'size-3.5 shrink-0') + '<span class="hidden sm:inline">' + esc(label) + '</span></button>';
+  rows.push('<div class="flex items-center gap-3 px-3.5 py-3">' + fgFlagIcon(priv ? 'lock' : 'users', priv) +
+    '<span class="min-w-0 flex-1"><span class="block text-sm font-medium text-zinc-900 dark:text-zinc-100">' + (priv ? 'Privada' : 'Compartida con el equipo') + '</span>' +
+    (priv ? '<span class="block text-xs text-zinc-500 dark:text-zinc-400" title="Igual queda guardada en la planilla del equipo">' + esc(fgWhoSees(t, priv, t.resp)) + '</span>' : '') + '</span>' +
+    '<span role="radiogroup" aria-label="Visibilidad" class="inline-flex shrink-0 rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800">' +
+    seg('0', 'Compartida', 'users', !priv) + seg('1', 'Privada', 'lock', priv) + '</span></div>');
+  return '<div class="overflow-hidden rounded-xl border border-zinc-200/80 dark:border-zinc-800"><div class="divide-y divide-zinc-100 dark:divide-zinc-800">' + rows.join('') + '</div></div>';
+}
+function fgDoneLink(label, ic, id) {
+  return '<button type="button" data-action="task.closing" data-id="' + esc(id) + '" class="mt-2 inline-flex items-center gap-1.5 rounded text-sm font-medium text-emerald-700 transition hover:text-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 dark:text-emerald-300 dark:hover:text-emerald-200">' +
+    icon(ic, 'size-3.5 shrink-0') + esc(label) + '</button>';
+}
+function fgTaskDrawer(id) {
+  const t = IDX.task.get(id);
+  if (!t) return null;
+  const done = t.estado === 'Realizada';
+  const di = dueInfo(t);
+  const proj = t.proyecto ? IDX.project.get(t.proyecto) : null;
+  let html = '';
+  if (done) {
+    html += '<div class="mb-5 rounded-xl border border-emerald-200/80 bg-emerald-50/60 p-4 dark:border-emerald-500/20 dark:bg-emerald-500/10">' +
+      '<div class="flex items-center gap-2 text-sm font-semibold text-emerald-800 dark:text-emerald-300">' + icon('circle-check-big', 'size-4 shrink-0') +
+      'Lista' + (t.completada ? ' el ' + esc(fgWeekday(t.completada) + ' ' + fmtDate(t.completada)) : '') + '</div>' +
+      (t.cierre
+        ? '<div class="mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed text-emerald-950/80 dark:text-emerald-50/90">' + linkify(t.cierre) + '</div>' +
+          fgDoneLink('Editar comentario', 'pencil', t.id)
+        : fgDoneLink('Agregar comentario de cierre', 'message-square-text', t.id)) +
+      '</div>';
+  }
+  const ev = fgCleanEv(t.evidencias);
+  const hasCas = !!(t.cascade && IDX.cascade.get(t.cascade));
+  // Fecha: el valor se cambia ahí mismo (pickDate); en rojo sólo si está atrasada
+  const late = di.key === 'overdue';
+  const redate = done ? '' : '<button type="button" data-action="task.redate" data-id="' + esc(t.id) + '" class="ml-2 rounded text-xs font-medium text-indigo-600 transition hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400 dark:hover:text-indigo-300">' + (t.fecha ? 'Cambiar' : 'Poner fecha') + '</button>';
+  const rows = [];
+  if (proj) {
+    rows.push(['Proyecto', 'folder-kanban', '<button type="button" data-action="project.open" data-id="' + esc(proj.id) + '" class="group inline-flex max-w-full items-center gap-1.5 rounded text-left font-medium text-zinc-900 transition hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-100 dark:hover:text-indigo-400"><span class="break-words">' + esc(proj.nombre) + '</span>' + icon('chevron-right', 'size-3.5 shrink-0 text-zinc-400 transition group-hover:translate-x-0.5') + '</button>']);
+  }
+  // v3.6 (SPEC §20): una o varias personas; «Cambiar» abre el selector (responsable / sumar personas)
+  const ppl = taskPeople(t), me = myEmail();
+  rows.push([ppl.length > 1 ? 'Personas' : 'Responsable', ppl.length > 1 ? 'users' : 'user-round',
+    '<span class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">' +
+    (ppl.length ? ppl.map((e, i) => '<span class="inline-flex min-w-0 max-w-full items-center gap-2">' + avatar(e, 'sm') +
+      '<span class="font-medium">' + esc(e === me ? userName(e) + ' (tú)' : userName(e)) + '</span>' +
+      (i === 0 && ppl.length > 1 ? '<span class="text-[11px] text-zinc-400 dark:text-zinc-500">responsable</span>' : '') + '</span>').join('') : fgMuted('Sin asignar')) +
+    '<button type="button" data-action="task.people" data-id="' + esc(t.id) + '" class="rounded text-xs font-medium text-indigo-600 transition hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400 dark:hover:text-indigo-300">' +
+    (ppl.length ? 'Cambiar' : 'Asignar') + '</button></span>']);
+  rows.push(['Fecha', 'calendar', (t.fecha
+    ? '<span class="tabular-nums' + (late ? ' font-medium text-red-600 dark:text-red-400' : '') + '">' + esc(fgWeekday(t.fecha) + ' ' + fmtDate(t.fecha)) + '</span>' +
+      (done ? '' : '<span class="' + (late ? 'text-red-600/80 dark:text-red-400/80' : 'text-zinc-500 dark:text-zinc-400') + '"> · ' + esc(fgRelDays(t.fecha)) + '</span>')
+    : fgMuted('Sin fecha')) + redate]);
+  if (hasCas) rows.push(['Indicador Cascade', 'target', fgCascadeDetail(t.cascade, 'Sin indicador')]);
+  if (t.detalle) rows.push(['Nota', 'sticky-note', '<div class="whitespace-pre-wrap break-words leading-relaxed">' + linkify(t.detalle) + '</div>']);
+  if (ev.length) rows.push(['Links', 'paperclip', '<div class="flex flex-wrap gap-2">' + ev.map(e => evidenceChip(e)).join('') + '</div>']);
+  html += '<dl class="divide-y divide-zinc-100 dark:divide-zinc-800">' + rows.map(r =>
+    '<div class="grid grid-cols-1 gap-1.5 py-3 first:pt-0 sm:grid-cols-[8.5rem_minmax(0,1fr)] sm:gap-4">' +
+    '<dt class="flex items-center gap-2 self-start text-xs font-medium text-zinc-500 sm:pt-0.5 dark:text-zinc-400">' + icon(r[1], 'size-3.5 shrink-0') + esc(r[0]) + '</dt>' +
+    '<dd class="min-w-0 text-sm text-zinc-800 dark:text-zinc-200">' + r[2] + '</dd></div>').join('') + '</dl>';
+  // Atajos para sumar lo que falta (abren el compositor justo ahí)
+  const adds = [];
+  if (!proj && !done) adds.push(['Proyecto', 'proyecto']);
+  if (!t.detalle) adds.push(['Nota', 'note']);
+  if (!ev.length) adds.push(['Links', 'more']);
+  if (!hasCas) adds.push(['Indicador', 'more']);
+  if (adds.length) {
+    html += '<div class="-ml-1.5 mt-1 flex flex-wrap items-center gap-1">' + adds.map(a =>
+      '<button type="button" data-action="task.edit" data-id="' + esc(t.id) + '" data-focus="' + a[1] + '" class="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">' +
+      icon('plus', 'size-3.5') + esc(a[0]) + '</button>').join('') + '</div>';
+  }
+  html += '<div class="mt-6">' + fgTaskFlags(t) + '</div>';
+  // Una línea discreta: quién la creó y cuándo (la última edición va en el title)
+  if (t.creado) {
+    const upd = t.actualizado && t.actualizado !== t.creado ? 'Actualizada ' + fgWhen(t.actualizado) + (t.actualizadoPor ? ' por ' + userName(t.actualizadoPor) : '') : '';
+    html += '<p class="mt-5 text-xs text-zinc-400 dark:text-zinc-500" title="' + esc(fmtDateTime(t.creado) + (upd ? ' · ' + upd : '')) + '">Creada' +
+      (t.creadoPor ? ' por ' + esc(userName(t.creadoPor)) : '') + ' ' + esc(fgWhen(t.creado)) + '</p>';
+  }
+  html += '<section class="mt-8">' + sectionHeader({ title: 'Comentarios', icon: 'message-square' }) + commentsPanel(t.id) + '</section>';
+  return {
+    title: t.nombre || 'Tarea sin nombre',
+    iconHtml: '<div class="flex shrink-0 items-center gap-1">' + fgBackBtn() + '<span class="grid size-7 place-items-center">' + fgCheck(t, 'lg') + '</span></div>',
+    // Fecha, responsable y estado ya están en el cuerpo: arriba sólo el pilar y el candado
+    subtitle: (fgPilarKey(t.pilar) ? fgPillarChip(t.pilar) : '') +
+      (fgPrivada(t) ? fgSoftChip('Privada', 'zinc', 'lock', fgWhoSees(t, true, t.resp)) : ''),
+    headerRight: iconBtn({ icon: 'pencil', action: 'task.edit', data: { id: t.id }, title: 'Editar tarea' }),
+    body: html,
+    footer: fgRBtn({ label: 'Eliminar', icon: 'trash', variant: 'danger-ghost', action: 'task.delete', data: { id: t.id }, title: 'Eliminar tarea', cls: 'mr-auto' }) +
+      fgRBtn({ label: 'Editar', icon: 'pencil', variant: 'secondary', action: 'task.edit', data: { id: t.id }, title: 'Editar tarea' }) +
+      (done
+        ? btn({ label: 'Reabrir', icon: 'rotate-ccw', variant: 'secondary', action: 'task.reopen', data: { id: t.id }, title: 'Volver a dejarla pendiente' })
+        : btn({ label: 'Completar', icon: 'check', variant: 'success', action: 'task.complete', data: { id: t.id }, title: 'Marcarla como lista, con un comentario opcional' })),
+  };
+}
+
+/* =====================================================================
+   Compositor de tareas · openTaskForm({id?, pilar?, proyecto?, fecha?, cascade?, nombre?, resp?, focus?})
+   "Que invite a hacerlo": título grande, nota opcional y píldoras con selectores pequeños en línea.
+   El estado vive en inputs ocultos [data-fg-st] dentro de [data-fg-cmp]; las acciones task.cmp.* lo leen y repintan.
+   focus: 'note' | 'more' | 'fecha' | 'resp' | 'proyecto' → abre el compositor justo en ese punto.
+   ===================================================================== */
+const FG_MINI_INPUT = 'h-8 rounded-lg border-0 bg-white px-2.5 text-xs text-zinc-900 shadow-sm ring-1 ring-inset ring-zinc-300 placeholder:text-zinc-400 transition focus:outline-none focus:ring-2 focus:ring-inset focus:ring-indigo-500 dark:bg-zinc-800/70 dark:text-zinc-100 dark:ring-zinc-700 dark:placeholder:text-zinc-500 dark:focus:ring-indigo-400 dark:[color-scheme:dark]';
+function fgCmpRoot(el) { return el && el.closest ? el.closest('[data-fg-cmp]') : null; }
+function fgCmpHidden(name, v) { return '<input type="hidden" data-fg-st name="' + name + '" value="' + esc(v == null ? '' : v) + '">'; }
+function fgCmpGet(root) {
+  const v = n => { const i = root.querySelector('[data-fg-st][name="' + n + '"]'); return i ? i.value : ''; };
+  const asignados = v('asignados') ? v('asignados').split(',').filter(Boolean) : [];
+  const multi = asignados.length > 0;   // v3.6 (SPEC §20): con varias personas es del equipo (no se puede hacer privada)
+  return {
+    fecha: v('fecha'), resp: v('resp'), asignados: asignados, proyecto: v('proyecto'), pilar: v('pilar'),
+    avisar: v('avisar') !== '0', privada: v('privada') === '1',
+    canPriv: !multi && root.dataset.canPriv !== '0', privBlock: multi ? FG_MULTI_PUBLIC : (root.dataset.privBlock || ''), create: root.dataset.mode === 'new', done: root.dataset.done === '1', creator: root.dataset.creator || '', pop: root.dataset.pop || '',
+    // §15: privTouched = la persona tocó el interruptor (desde ahí manda ella); privStored / hadProj = cómo venía la tarea al editar
+    privTouched: root.dataset.privTouched === '1', privAuto: root.dataset.privTouched !== '1', privStored: root.dataset.privStored === '1', hadProj: !!root.dataset.keep,
+  };
+}
+// Privacidad automática del compositor (SPEC §15) mientras no se toque el interruptor; null = no se cambia.
+// Nueva: privada sin proyecto y compartida con proyecto. Al editar se conserva lo guardado, salvo una privada sin
+// proyecto a la que se le pone uno (pasa a compartida; si se le quita, vuelve a privada).
+function fgCmpAutoPriv(st, proyecto) {
+  if (!st || !st.canPriv || st.privTouched) return null;
+  if (st.create) return !proyecto;
+  return st.privStored && !st.hadProj ? !proyecto : !!st.privStored;
+}
+function fgCmpSet(root, patch) {
+  Object.keys(patch || {}).forEach(k => {
+    const i = root.querySelector('[data-fg-st][name="' + k + '"]');
+    if (!i) return;
+    const v = patch[k];
+    i.value = typeof v === 'boolean' ? (v ? '1' : '0') : String(v == null ? '' : v);
+  });
+  fgCmpPaint(root);
+}
+const FG_MINI = 'inline-flex h-6 items-center gap-1 whitespace-nowrap rounded-md px-2 text-[11px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 disabled:cursor-not-allowed disabled:opacity-60 ';
+const FG_MINI_OFF = 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100';
+const FG_MINI_ON = 'bg-indigo-50 text-indigo-700 ring-1 ring-inset ring-indigo-500/20 dark:bg-indigo-500/10 dark:text-indigo-300 dark:ring-indigo-400/25';
+// Fila principal: Fecha · Para · Proyecto (cada una abre un selector pequeño en línea) y, a la derecha,
+// los interruptores Avisarme (por defecto encendido) y Compartida / Privada (§15: privada sin proyecto, compartida con proyecto).
+function fgCmpChips(st) {
+  const me = myEmail();
+  const chip = (kind, cls, inner, title) => '<button type="button" data-action="task.cmp.pop" data-pop="' + kind + '" aria-expanded="' + (st.pop === kind) + '" aria-haspopup="true" title="' + esc(title) + '" class="' + FG_PILL + ' ' + cls + '">' + inner + '</button>';
+  const late = !!st.fecha && daysUntil(st.fecha) < 0;
+  let h = chip('fecha', st.fecha ? (late ? FG_PILL_LATE : FG_PILL_ON) : FG_PILL_OFF,
+    icon('calendar', 'size-3.5 shrink-0') + '<span class="truncate">' + esc(st.fecha ? fgDayLabel(st.fecha) : 'Fecha') + '</span>',
+    st.fecha ? fgWeekday(st.fecha) + ' ' + fmtDate(st.fecha) : 'Ponerle fecha (opcional)');
+  const ppl = [st.resp].concat(st.asignados || []).filter(Boolean);
+  const forMe = !!st.resp && st.resp === me && ppl.length === 1;
+  const who = st.resp === me ? 'mí' : userName(st.resp);
+  h += chip('resp', ppl.length && !forMe ? FG_PILL_ON : FG_PILL_OFF,
+    (ppl.length ? '<span class="-ml-1 flex">' + avatarStack(ppl, 'xs', 3) + '</span>' : icon('user-round', 'size-3.5 shrink-0')) +
+    '<span class="truncate">' + esc(ppl.length > 1 ? 'Para ' + who + ' +' + (ppl.length - 1) : forMe ? 'Para mí' : st.resp ? 'Para ' + userName(st.resp) : 'Para…') + '</span>',
+    ppl.length ? 'Personas: ' + ppl.map(userName).join(', ') : 'Elegir quién la hace');
+  const p = st.proyecto ? IDX.project.get(st.proyecto) : null;
+  const pl = p ? PIL(p.pilar) : null;
+  h += chip('proyecto', p ? FG_PILL_ON : FG_PILL_OFF,
+    icon('folder-kanban', 'size-3.5 shrink-0' + (pl ? ' ' + pl.tone.text : '')) + '<span class="max-w-[15rem] truncate">' + esc(p ? p.nombre : 'Proyecto') + '</span>',
+    p ? 'Proyecto: ' + p.nombre + (pl ? ' · ' + pl.label : '') : 'Sumarla a un proyecto (opcional)');
+  const avisar = '<button type="button" role="switch" aria-checked="' + st.avisar + '" data-action="task.cmp.toggle" data-key="avisar" title="' +
+    esc(st.avisar ? 'Avisarme: un correo si pasa la fecha sin estar lista. Clic para apagarlo.' : 'Sin aviso por correo. Clic para activarlo.') + '" class="' + FG_MINI + (st.avisar ? FG_MINI_ON : FG_MINI_OFF) + '">' +
+    icon(st.avisar ? 'bell' : 'bell-off', 'size-3 shrink-0') + (st.avisar ? 'Avisarme' : 'Sin aviso') + '</button>';
+  const priv = '<button type="button" role="switch" aria-checked="' + st.privada + '" data-action="task.cmp.toggle" data-key="privada"' + (st.canPriv ? '' : ' disabled') + ' title="' +
+    esc(!st.canPriv ? (st.privBlock || 'No se puede cambiar') : st.privada ? 'Privada: sólo tú y el responsable la ven en la app. Clic para compartirla.' : 'Compartida: todo el equipo la ve. Clic para hacerla privada (sólo tú y el responsable la ven en la app).') +
+    '" class="' + FG_MINI + (st.privada ? FG_MINI_ON : FG_MINI_OFF) + '">' +
+    icon(st.privada ? 'lock' : 'users', 'size-3 shrink-0') + (st.privada ? 'Privada' : 'Compartida') + '</button>';
+  return h + '<div class="ml-auto flex shrink-0 items-center gap-0.5">' + avisar + priv + '</div>';
+}
+// Mini-chips de pilar (sólo sin proyecto: con proyecto manda el pilar del proyecto)
+function fgCmpPils(st) {
+  if (st.proyecto) return '';
+  const b = (val, label, ic, on, onCls, title) => '<button type="button" data-action="task.cmp.pilar" data-value="' + esc(val) + '" aria-pressed="' + on + '" title="' + esc(title) + '" class="' + FG_MINI + (on ? onCls : FG_MINI_OFF) + '">' +
+    (ic ? icon(ic, 'size-3 shrink-0') : '') + esc(label) + '</button>';
+  return '<div class="mt-2.5 flex flex-wrap items-center gap-0.5" role="group" aria-label="Pilar">' +
+    '<span class="mr-1 text-[11px] text-zinc-400 dark:text-zinc-500">Pilar</span>' +
+    (S.pillars || []).map(p => {
+      const P = PIL(p.key);
+      return b(p.key, FG_PIL_SHORT[p.key] || p.label, p.icon, st.pilar === p.key, (P ? P.tone.soft : FG_SOFT.zinc) + ' ring-1 ring-inset', p.label);
+    }).join('') +
+    b('', 'Ninguno', '', !st.pilar, FG_SOFT.zinc + ' ring-1 ring-inset ring-zinc-500/20 dark:ring-zinc-400/20', 'Tarea personal, sin pilar') + '</div>';
+}
+// Sólo lo que evita sorpresas (§14.4): fecha pasada, aviso sin destinatario y privacidad.
+// Lo rutinario («un correo si vence») queda en el title del interruptor Avisarme.
+function fgCmpHint(st) {
+  const lines = [];
+  // Una tarea ya lista no genera avisos: sólo se explica la privacidad
+  if (st.fecha && !st.done) {
+    const d = daysUntil(st.fecha);
+    if (d != null && d < 0) lines.push(['calendar-x', 'Esa fecha ya pasó: quedará atrasada.']);
+    if (st.avisar && !st.resp) lines.push(['bell', 'Sin responsable: nadie recibirá el aviso por correo.']);
+  }
+  // §15: la privada por defecto (sin tocar el interruptor) no repite la explicación: basta el candado de la píldora
+  if (st.privada && st.privAuto !== true) {
+    const who = fgWhoSees({ creadoPor: st.creator }, true, st.resp);
+    lines.push(['lock', 'Privada: ' + who.charAt(0).toLowerCase() + who.slice(1) + '. Igual queda guardada en la planilla del equipo.']);
+  }
+  return lines.map(l => '<p class="flex items-start gap-1.5">' + icon(l[0], 'mt-px size-3.5 shrink-0 text-zinc-400 dark:text-zinc-500') + '<span>' + esc(l[1]) + '</span></p>').join('');
+}
+// Repinta píldoras, pilares y ayuda; conserva el foco del teclado en la píldora equivalente
+function fgCmpPaint(root) {
+  const st = fgCmpGet(root);
+  const ae = document.activeElement;
+  let sel = '';
+  if (ae && root.contains(ae) && ae.closest('[data-fg-chips], [data-fg-pils]')) {
+    sel = ae.dataset.pop ? '[data-pop="' + ae.dataset.pop + '"]'
+      : ae.dataset.key ? '[data-key="' + ae.dataset.key + '"]'
+      : ae.dataset.action === 'task.cmp.pilar' ? '[data-action="task.cmp.pilar"][data-value="' + (ae.dataset.value || '') + '"]' : '';
+  }
+  [['[data-fg-chips]', fgCmpChips], ['[data-fg-pils]', fgCmpPils], ['[data-fg-hint]', fgCmpHint]].forEach(x => {
+    const n = root.querySelector(x[0]);
+    if (n) { n.innerHTML = x[1](st); refreshIcons(n); }
+  });
+  if (sel) { const n = root.querySelector(sel); if (n) n.focus({ preventScroll: true }); }
+}
+// Abre / cierra el selector en línea de una píldora (uno a la vez)
+function fgCmpPop(root, kind) {
+  const box = root.querySelector('[data-fg-pop]');
+  if (!box) return;
+  const next = kind && kind !== (root.dataset.pop || '') ? kind : '';
+  root.dataset.pop = next;
+  if (!next) {
+    box.hidden = true;
+    box.innerHTML = '';
+  } else {
+    const st = fgCmpGet(root);
+    box.innerHTML = '<div class="anim-fade-in">' + (next === 'fecha' ? fgCmpPopFecha(st) : next === 'resp' ? fgCmpPopResp(st) : fgCmpPopProyecto(st, root.dataset.keep || '')) + '</div>';
+    box.hidden = false;
+    refreshIcons(box);
+    if (next === 'proyecto') { const s = box.querySelector('[data-fg-pq]'); if (s) setTimeout(() => s.focus({ preventScroll: true }), 20); }
+    if (box.scrollIntoView) box.scrollIntoView({ block: 'nearest' });
+  }
+  root.querySelectorAll('[data-action="task.cmp.pop"]').forEach(b => b.setAttribute('aria-expanded', b.dataset.pop === next ? 'true' : 'false'));
+}
+function fgCmpFocusChip(root, kind) {
+  const b = root.querySelector('[data-action="task.cmp.pop"][data-pop="' + kind + '"]');
+  if (b) b.focus({ preventScroll: true });
+}
+function fgCmpPopFecha(st) {
+  const today = todayStr();
+  const opts = [['Hoy', 'sun', today], ['Mañana', 'sunrise', addDays(today, 1)], ['Viernes', 'calendar-days', fgNextDow(5)], ['Próx. semana', 'calendar-plus', fgNextDow(1)]];
+  return '<div class="grid grid-cols-2 gap-1 sm:grid-cols-4">' + opts.map(o => {
+    const on = st.fecha === o[2];
+    return '<button type="button" data-action="task.cmp.date" data-value="' + o[2] + '" aria-pressed="' + on + '" class="flex min-w-0 flex-col items-start gap-0.5 rounded-lg px-2 py-2 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 ' +
+      (on ? 'bg-indigo-50 text-indigo-700 ring-1 ring-inset ring-indigo-200 dark:bg-indigo-500/15 dark:text-indigo-200 dark:ring-indigo-500/30' : 'text-zinc-700 hover:bg-white hover:shadow-sm dark:text-zinc-200 dark:hover:bg-zinc-800') + '">' +
+      '<span class="inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium">' + icon(o[1], 'size-3.5 shrink-0') + esc(o[0]) + '</span>' +
+      '<span class="text-[11px] text-zinc-500 dark:text-zinc-400">' + esc(fgWeekday(o[2]) + ' ' + fmtDateShort(o[2])) + '</span></button>';
+  }).join('') + '</div>' +
+    '<div class="mt-1.5 flex flex-wrap items-center gap-2 border-t border-zinc-200/70 px-1.5 pt-2 dark:border-zinc-700/60">' +
+    '<label class="inline-flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">' + icon('calendar', 'size-3.5 shrink-0 text-zinc-400') + 'Elegir…' +
+    '<input type="date" data-change="task.cmp.datepick" value="' + esc(st.fecha) + '" aria-label="Elegir fecha" class="' + FG_MINI_INPUT + '"></label>' +
+    (st.fecha ? '<button type="button" data-action="task.cmp.date" data-value="" class="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-zinc-500 transition hover:bg-white hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100">' + icon('x', 'size-3.5') + 'Sin fecha</button>' : '') +
+    '</div>';
+}
+function fgCmpPopResp(st) {
+  return fgPplHtml({ resp: st.resp, asignados: (st.asignados || []).slice() }, 'cmp') +
+    '<div class="mt-2 flex justify-end border-t border-zinc-200/70 pt-2 dark:border-zinc-700/60">' +
+    '<button type="button" data-action="task.cmp.pop" data-pop="resp" class="rounded-md px-2.5 py-1 text-xs font-semibold text-indigo-600 transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-300 dark:hover:bg-zinc-800">Listo</button></div>';
+}
+
+/* ---------- Personas de una tarea (v3.6, SPEC §20) ---------- */
+// st = {resp, asignados}. Tocar a alguien lo suma o lo quita; «Hacer responsable» elige quién queda a cargo.
+function fgPplToggle(st, email) {
+  if (!email) return st;
+  if (email === st.resp) { st.resp = st.asignados.shift() || ''; return st; }
+  const i = st.asignados.indexOf(email);
+  if (i >= 0) st.asignados.splice(i, 1);
+  else if (!st.resp) st.resp = email;
+  else st.asignados.push(email);
+  return st;
+}
+function fgPplOwner(st, email) {
+  const i = st.asignados.indexOf(email);
+  if (i < 0) return st;
+  st.asignados.splice(i, 1);
+  if (st.resp) st.asignados.unshift(st.resp);
+  st.resp = email;
+  return st;
+}
+// Lista de personas del equipo. mode 'cmp' (compositor): acciones task.cmp.*; si no, atributos data-ppl-* (ventana).
+function fgPplHtml(st, mode) {
+  const me = myEmail();
+  const users = (S.users || []).slice().sort((a, b) => (a.email === me ? -1 : b.email === me ? 1 : 0));
+  [st.resp].concat(st.asignados).forEach(e => { if (e && !users.some(u => u.email === e)) users.push({ email: e, name: userName(e) }); });
+  const at = (kind, email) => mode === 'cmp'
+    ? ' data-action="task.cmp.' + (kind === 'owner' ? 'owner' : 'ppl') + '" data-value="' + esc(email) + '"'
+    : ' data-ppl-' + kind + '="' + esc(email) + '"';
+  const row = u => {
+    const owner = u.email === st.resp, on = owner || st.asignados.indexOf(u.email) >= 0;
+    return '<div class="flex items-center gap-2 rounded-xl px-1.5 py-1 transition-colors ' + (on ? 'bg-indigo-50/70 dark:bg-indigo-500/10' : 'hover:bg-zinc-100/70 dark:hover:bg-zinc-800/50') + '">' +
+      '<button type="button"' + at('toggle', u.email) + ' role="checkbox" aria-checked="' + on + '" class="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg py-0.5 text-left text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60">' +
+      avatar(u.email, 'md') + '<span class="min-w-0 flex-1 truncate ' + (on ? 'font-semibold text-zinc-900 dark:text-white' : 'text-zinc-700 dark:text-zinc-200') + '">' + esc(u.email === me ? u.name + ' (tú)' : u.name) + '</span>' +
+      '<span class="grid size-5 shrink-0 place-items-center rounded-md border ' + (on ? 'border-indigo-600 bg-indigo-600 text-white dark:border-indigo-500 dark:bg-indigo-500' : 'border-zinc-300 text-transparent dark:border-zinc-600') + '">' + icon('check', 'size-3.5') + '</span></button>' +
+      (owner ? '<span class="shrink-0 rounded-md bg-indigo-600 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white dark:bg-indigo-500">Responsable</span>'
+        : on ? '<button type="button"' + at('owner', u.email) + ' class="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-indigo-600 transition hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-300 dark:hover:bg-indigo-500/20">Hacer responsable</button>' : '') +
+      '</div>';
+  };
+  const n = (st.resp ? 1 : 0) + st.asignados.length;
+  return '<div class="space-y-0.5" role="group" aria-label="Personas">' + users.map(row).join('') + '</div>' +
+    '<p class="mt-2.5 flex items-start gap-1.5 px-1 text-xs text-zinc-500 dark:text-zinc-400">' + icon(n > 1 ? 'users' : 'info', 'mt-px size-3.5 shrink-0') +
+    esc(n > 1 ? 'Con más de una persona la tarea es del equipo (pública) y le aparece a cada una en «Mis tareas».'
+      : n ? 'Toca a otra persona para sumarla.' : 'Sin nadie a cargo, queda en «Mis tareas» de quien la creó.') + '</p>';
+}
+// «Personas» de una tarea (Mis tareas, menú ⋯ y tarjeta): cambiar el responsable o sumar personas. Al instante.
+function openPeoplePicker(id) {
+  if (!fgReady() || /^tmp-/i.test(String(id || ''))) return;
+  const t = IDX.task.get(id);
+  if (!t) { toast('No se encontró la tarea', 'error'); return; }
+  const st = { resp: t.resp || '', asignados: (t.asignados || []).slice() };
+  const before = JSON.stringify([st.resp, st.asignados]);
+  openModal({
+    size: 'sm', title: 'Personas', subtitle: esc(t.nombre), autofocus: false,
+    body: '<div data-ppl>' + fgPplHtml(st) + '</div>',
+    footer: btn({ label: 'Cancelar', variant: 'ghost', action: 'modal.close' }) + btn({ label: 'Guardar', icon: 'check', variant: 'primary', attrs: 'data-ppl-save' }),
+    onMount: (el, close) => {
+      const box = el.querySelector('[data-ppl]');
+      el.addEventListener('click', ev => {
+        const b = ev.target.closest && ev.target.closest('[data-ppl-toggle], [data-ppl-owner], [data-ppl-save]');
+        if (!b) return;
+        ev.preventDefault();
+        if (b.hasAttribute('data-ppl-save')) {
+          close();
+          if (JSON.stringify([st.resp, st.asignados]) === before) return;
+          const multi = st.asignados.length > 0;
+          const patch = { tipo: 'Tarea', id: t.id, resp: st.resp, asignados: st.asignados.slice() };
+          if (multi) patch.privada = false;
+          optimistic(() => {
+            const x = IDX.task.get(t.id);
+            if (x) { x.resp = st.resp; x.asignados = st.asignados.slice(); if (multi) x.privada = false; }
+          }, 'gSave', [patch], { reapply: true });
+          toast(multi ? 'Listo: ahora son ' + (st.asignados.length + 1) + ' personas (la ve el equipo)' : 'Personas actualizadas', 'success');
+          return;
+        }
+        const email = b.getAttribute(b.hasAttribute('data-ppl-owner') ? 'data-ppl-owner' : 'data-ppl-toggle');
+        if (b.hasAttribute('data-ppl-owner')) fgPplOwner(st, email); else fgPplToggle(st, email);
+        box.innerHTML = fgPplHtml(st);
+        refreshIcons(box);
+        const again = box.querySelector('[data-ppl-toggle="' + (window.CSS && CSS.escape ? CSS.escape(email) : email) + '"]');
+        if (again) again.focus({ preventScroll: true });
+      });
+    },
+  });
+}
+// Proyectos no cerrados (más el actual al editar), agrupados por pilar con el pilar elegido primero
+function fgCmpPopProyecto(st, keep) {
+  const list = (S.projects || []).filter(p => p.estado !== 'Cerrado' || (!!keep && p.id === keep));
+  const keys = [st.pilar].concat((S.pillars || []).map(p => p.key).filter(k => k !== st.pilar)).filter(Boolean);
+  const opt = (p, k) => {
+    const on = p ? p.id === st.proyecto : !st.proyecto;
+    const pl = p ? PIL(k) : null;
+    return '<button type="button" role="option" aria-selected="' + on + '" data-action="task.cmp.proj" data-value="' + esc(p ? p.id : '') + '" data-fg-popt' +
+      (p ? ' data-group="' + esc(k) + '" data-q="' + esc(normTxt(p.nombre + ' ' + (pl ? pl.label : ''))) + '"' : ' data-none') +
+      ' class="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500/60 ' +
+      (on ? 'bg-indigo-50 text-indigo-900 dark:bg-indigo-500/15 dark:text-indigo-100' : 'text-zinc-700 hover:bg-white dark:text-zinc-200 dark:hover:bg-zinc-800') + '">' +
+      icon(p ? 'folder-kanban' : 'circle-x', 'size-4 shrink-0 ' + (pl ? pl.tone.text : 'text-zinc-400')) +
+      '<span class="min-w-0 flex-1 truncate">' + esc(p ? p.nombre : 'Sin proyecto') + '</span>' +
+      (p && p.estado && p.estado !== 'Activo' ? '<span class="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">' + esc(p.estado) + '</span>' : '') +
+      (on ? icon('check', 'size-4 shrink-0 text-indigo-600 dark:text-indigo-400') : '') + '</button>';
+  };
+  let h = opt(null);
+  let any = false;
+  keys.forEach(k => {
+    const ps = list.filter(p => fgPilarKey(p.pilar) === k).sort((a, b) => fgCmpStr(a.nombre, b.nombre));
+    if (!ps.length) return;
+    any = true;
+    const pl = PIL(k);
+    h += '<div data-fg-pgroup="' + esc(k) + '" class="flex items-center gap-1.5 px-2 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">' +
+      (pl ? icon(pl.icon, 'size-3 shrink-0 ' + pl.tone.text) + esc(pl.label) : esc(k)) + '</div>';
+    ps.forEach(p => { h += opt(p, k); });
+  });
+  if (!any) h += '<p class="px-2 py-4 text-center text-xs text-zinc-500 dark:text-zinc-400">Aún no hay proyectos activos.</p>';
+  h += '<p data-fg-pempty hidden class="px-2 py-4 text-center text-xs text-zinc-500 dark:text-zinc-400">Sin resultados.</p>';
+  return '<div class="relative mb-1"><span class="pointer-events-none absolute inset-y-0 left-2.5 grid place-items-center text-zinc-400">' + icon('search', 'size-3.5') + '</span>' +
+    '<input type="search" data-fg-pq data-input="task.cmp.projq" data-enter="task.cmp.projfirst" autocomplete="off" placeholder="Buscar proyecto…" aria-label="Buscar proyecto" class="' + FG_MINI_INPUT + ' w-full pl-8"></div>' +
+    '<div role="listbox" aria-label="Proyectos" class="max-h-60 overflow-y-auto overscroll-contain">' + h + '</div>';
+}
+function fgCmpFilterProjects(root, q) {
+  const terms = normTxt(q).split(/\s+/).filter(Boolean);
+  const vis = {};
+  let shown = 0;
+  root.querySelectorAll('[data-fg-popt]').forEach(o => {
+    if (o.hasAttribute('data-none')) { o.hidden = terms.length > 0; return; }
+    const ok = terms.every(x => (o.dataset.q || '').indexOf(x) >= 0);
+    o.hidden = !ok;
+    if (ok) { shown++; vis[o.dataset.group] = 1; }
+  });
+  root.querySelectorAll('[data-fg-pgroup]').forEach(g => { g.hidden = !vis[g.dataset.fgPgroup]; });
+  const e = root.querySelector('[data-fg-pempty]');
+  if (e) e.hidden = !terms.length || shown > 0;
+}
+// Elegir proyecto: el pilar lo sigue; hereda su indicador (si no había uno) y su responsable (si no había)
+function fgCmpPickProject(root, id) {
+  const p = id ? IDX.project.get(id) : null;
+  const st = fgCmpGet(root);
+  const patch = { proyecto: p ? p.id : '' };
+  if (p) {
+    patch.pilar = fgPilarKey(p.pilar);
+    if (!st.resp && p.resp) patch.resp = p.resp;
+  }
+  // §15: con proyecto la ve el equipo; sin proyecto vuelve a privada (sólo si no se tocó el interruptor)
+  const priv = fgCmpAutoPriv(st, patch.proyecto);
+  if (priv !== null && priv !== st.privada) patch.privada = priv;
+  fgCmpSet(root, patch);
+  if (p && patch.pilar !== st.pilar) fgCpkRepilar(root, 'cascade', patch.pilar);
+  if (p) {
+    const cpk = root.querySelector('[data-cpk][data-name="cascade"]');
+    const inp = cpk ? cpk.querySelector('[data-cpk-value]') : null;
+    const cas = fgProjCascade(p);
+    if (inp && !inp.value && cas) fgCpkSet(cpk, cas);
+  }
+  fgCmpMoreSummary(root);
+  fgEvSyncUpload(root);
+  refreshIcons(root);
+}
+function fgCmpMore(root, open) {
+  const box = root.querySelector('[data-fg-more]');
+  if (!box) return;
+  const on = open == null ? box.hidden : !!open;
+  box.hidden = !on;
+  const b = root.querySelector('[data-action="task.cmp.more"]');
+  if (b) b.setAttribute('aria-expanded', on ? 'true' : 'false');
+  if (on && box.scrollIntoView) setTimeout(() => box.scrollIntoView({ block: 'nearest' }), 20);
+}
+// Resumen al lado de "Más detalles" (para saber qué hay adentro sin abrirlo)
+function fgCmpMoreSummary(root) {
+  const s = root.querySelector('[data-fg-more-sum]');
+  if (!s) return;
+  const inp = root.querySelector('[data-cpk][data-name="cascade"] [data-cpk-value]');
+  const it = inp && inp.value ? IDX.cascade.get(inp.value) : null;
+  const nEv = readEvidence(root, 'evidencias').length;
+  const parts = [];
+  if (it) parts.push(it.nombre);
+  if (nEv) parts.push(plural(nEv, 'link', 'links'));
+  s.textContent = parts.length ? '· ' + parts.join(' · ') : '· indicador Cascade y links';
+}
+// Pilar de una tarea nueva: el del proyecto → el indicado → el de la ruta actual → '' (tarea personal, sin pilar)
+function fgTaskPilar(given, proj) {
+  if (proj && fgPilarKey(proj.pilar)) return fgPilarKey(proj.pilar);
+  if (fgPilarKey(given)) return fgPilarKey(given);
+  const rp = S.route && S.route.params ? S.route.params.pilar : '';
+  return fgPilarKey(rp);
+}
+// Payload completo de una tarea para gSave. Al crear no lleva id.
+function fgTaskPayload(t, over) {
+  t = t || {};
+  const o = Object.assign({
+    tipo: 'Tarea',
+    id: t.id || '',
+    pilar: fgPilarKey(t.pilar) || '',
+    proyecto: t.proyecto || '',
+    nombre: t.nombre || '',
+    detalle: t.detalle || '',
+    resp: t.resp || '',
+    asignados: (t.asignados || []).slice(),
+    fecha: t.fecha || '',
+    cascade: t.cascade || '',
+    evidencias: fgCleanEv(t.evidencias),
+    avisar: t.avisar !== false,
+    privada: t.privada === true,
+  }, over || {});
+  // v3.4 (SPEC §18): sin control de versión (base): se prefiere la agilidad y el último cambio gana.
+  delete o.base;
+  if (!o.id) delete o.id;
+  return o;
+}
+// Aplica a la tarea local un cambio en el formato de fgTaskPayload (para mostrarlo al instante).
+function fgApplyTask(x, patch) {
+  ['pilar', 'proyecto', 'nombre', 'detalle', 'resp', 'asignados', 'fecha', 'cascade', 'evidencias', 'avisar', 'privada', 'cierre', 'completada', 'estado']
+    .forEach(k => { if (k in patch) x[k] = patch[k]; });
+  return x;
+}
+function openTaskForm(o) {
+  o = o || {};
+  if (!fgReady()) return;
+  const t = o.id ? IDX.task.get(o.id) : null;
+  if (o.id && !t) { toast('No se encontró la tarea', 'error'); return; }
+  const projId = t ? (t.proyecto || '') : (o.proyecto || '');
+  const proj0 = projId ? IDX.project.get(projId) : null;
+  // Una tarea nueva no puede ir a un proyecto cerrado (SPEC §7): se ignora como sugerencia.
+  const proj = proj0 && (t || proj0.estado !== 'Cerrado') ? proj0 : null;
+  const pk = t ? (proj ? fgPilarKey(proj.pilar) : fgPilarKey(t.pilar)) : fgTaskPilar(o.pilar, proj);
+  const casVal = t ? (t.cascade || '') : (o.cascade || (proj ? fgProjCascade(proj) : ''));
+  const resp = t ? (t.resp || '') : (o.resp || myEmail() || (proj && proj.resp) || '');
+  const ev = t ? fgCleanEv(t.evidencias) : [];
+  const note = t ? (t.detalle || '') : '';
+  const focus = String(o.focus || '');
+  const moreOpen = focus === 'more' || (t ? (!!casVal || ev.length > 0) : !!o.cascade);
+  const noteOpen = !!note || focus === 'note';
+  // v3.4 (SPEC §18): valores al abrir; al editar sólo se envía lo que cambió (el último cambio gana, campo por campo)
+  const orig = t ? fgTaskPayload(t) : null;
+  // §15: nueva sin proyecto → privada; con proyecto → compartida (sin cuenta identificada, siempre compartida). Al editar, lo guardado.
+  const stored = !!t && fgPrivada(t);
+  const priv0 = t ? stored : fgCmpAutoPriv({ create: true, canPriv: fgCanPrivacy(null) }, proj ? proj.id : '') === true;
+  const body = '<div data-fg-cmp data-mode="' + (t ? 'edit' : 'new') + '" data-keep="' + esc(t ? (t.proyecto || '') : '') + '" data-can-priv="' + (fgCanPrivacy(t) ? '1' : '0') + '" data-priv-block="' + esc(fgPrivacyBlock(t)) + '" data-priv-stored="' + (stored ? '1' : '0') + '" data-priv-touched="0" data-creator="' + esc(t ? (t.creadoPor || '') : '') + '" data-done="' + (t && t.estado === 'Realizada' ? '1' : '0') + '" data-pop="">' +
+    fgCmpHidden('fecha', t ? (t.fecha || '') : (o.fecha || '')) + fgCmpHidden('resp', resp) + fgCmpHidden('asignados', t ? (t.asignados || []).join(',') : '') +
+    fgCmpHidden('proyecto', proj ? proj.id : '') + fgCmpHidden('pilar', pk) +
+    fgCmpHidden('avisar', !t || fgAvisar(t) ? '1' : '0') + fgCmpHidden('privada', priv0 ? '1' : '0') +
+    '<input type="text" name="nombre" autofocus maxlength="300" autocomplete="off" enterkeyhint="done" value="' + esc(t ? t.nombre : (o.nombre || '')) + '" placeholder="¿Qué hay que hacer?" aria-label="¿Qué hay que hacer?"' +
+    ' class="block w-full border-0 bg-transparent p-0 text-lg font-semibold tracking-tight text-zinc-900 placeholder:font-medium placeholder:text-zinc-400 focus:outline-none focus:ring-0 dark:text-white dark:placeholder:text-zinc-500">' +
+    '<div class="mt-1.5">' +
+    '<button type="button" data-action="task.cmp.note" data-fg-note-btn class="inline-flex items-center gap-1.5 rounded py-0.5 text-sm text-zinc-400 transition hover:text-zinc-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-500 dark:hover:text-zinc-300"' + (noteOpen ? ' hidden' : '') + '>' +
+    icon('text-align-start', 'size-3.5 shrink-0') + 'Agregar nota</button>' +
+    '<textarea name="detalle" data-fg-note rows="2" maxlength="8000" placeholder="Notas, contexto, links…" aria-label="Nota"' +
+    ' class="block w-full resize-none border-0 bg-transparent p-0 text-sm leading-relaxed text-zinc-700 placeholder:text-zinc-400 focus:outline-none focus:ring-0 dark:text-zinc-300 dark:placeholder:text-zinc-500"' + (noteOpen ? '' : ' hidden') + '>' + esc(note) + '</textarea></div>' +
+    '<div data-fg-chips class="mt-5 flex flex-wrap items-center gap-1.5"></div>' +
+    '<div data-fg-pils></div>' +
+    '<div data-fg-pop hidden class="mt-3 rounded-xl border border-zinc-200 bg-zinc-50/80 p-1.5 dark:border-zinc-800 dark:bg-zinc-800/30"></div>' +
+    '<div data-fg-hint aria-live="polite" class="mt-3 space-y-1 text-xs text-zinc-500 empty:hidden dark:text-zinc-400"></div>' +
+    '<div class="mt-5 border-t border-zinc-100 pt-3 dark:border-zinc-800">' +
+    '<button type="button" data-action="task.cmp.more" aria-expanded="' + moreOpen + '" class="group inline-flex max-w-full items-center gap-1.5 rounded text-xs font-medium text-zinc-500 transition hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:text-zinc-100">' +
+    icon('chevron-right', 'size-3.5 shrink-0 transition group-aria-expanded:rotate-90') + '<span class="shrink-0">Más detalles</span><span data-fg-more-sum class="truncate font-normal text-zinc-400 dark:text-zinc-500"></span></button>' +
+    '<div data-fg-more class="mt-3 space-y-4"' + (moreOpen ? '' : ' hidden') + '>' +
+    '<div>' + fgFieldLabel('Indicador Cascade') + cascadePickerHtml({ name: 'cascade', pilar: pk, value: casVal }) + '</div>' +
+    // «Subir archivo» aparece cuando la tarea tiene proyecto (sube a su carpeta de Drive y queda como link)
+    '<div>' + fgFieldLabel('Links y evidencias') + evidenceEditorHtml('evidencias', ev, { project: proj ? proj.id : '' }) + '</div>' +
+    '</div></div></div>';
+  openModal({
+    size: 'md',
+    title: t ? 'Editar tarea' : '',
+    autofocus: false,
+    body: body,
+    footer: fgSaveHint(t ? 'guardar' : 'crear') + btn({ label: 'Cancelar', variant: 'ghost', action: 'modal.close' }) +
+      btn({ label: t ? 'Guardar' : 'Crear tarea', icon: t ? 'check' : 'plus', variant: 'primary', attrs: 'data-fg-save' + (t && t.nombre ? '' : ' disabled') }),
+    onMount: (el, close) => {
+      if (!t) el.setAttribute('aria-label', 'Nueva tarea');
+      const root = el.querySelector('[data-fg-cmp]');
+      const name = root.querySelector('[name="nombre"]');
+      const noteEl = root.querySelector('[data-fg-note]');
+      const saveBtn = el.querySelector('[data-fg-save]');
+      // Sin título no hay nada que crear: el botón espera tranquilo (sin mensajes de error)
+      const sync = () => { if (saveBtn && saveBtn.dataset.idle == null) saveBtn.disabled = !name.value.trim(); };
+      name.addEventListener('input', sync);
+      sync();
+      fgCmpPaint(root);
+      fgCmpMoreSummary(root);
+      if (noteEl) { fgAutoGrow(noteEl); noteEl.addEventListener('input', () => fgAutoGrow(noteEl)); }
+      // Esc cierra primero el selector abierto (no el modal); un clic fuera del selector también lo cierra
+      el.addEventListener('keydown', ev => {
+        if (ev.key !== 'Escape' || !root.dataset.pop) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const k = root.dataset.pop;
+        fgCmpPop(root, '');
+        fgCmpFocusChip(root, k);
+      });
+      el.addEventListener('click', ev => {
+        if (!root.dataset.pop) return;
+        const tg = ev.target;
+        if (!tg || !tg.closest || tg.closest('[data-fg-pop]') || tg.closest('[data-action="task.cmp.pop"]')) return;
+        fgCmpPop(root, '');
+      });
+      // Sin proyecto, elegir un indicador de otro pilar lleva la tarea a ese pilar
+      root.addEventListener('change', ev => {
+        const tg = ev.target;
+        if (!tg || !tg.hasAttribute || !tg.hasAttribute('data-cpk-value')) return;
+        const st = fgCmpGet(root);
+        const it = tg.value ? IDX.cascade.get(tg.value) : null;
+        if (it && !st.proyecto && it.pilar && it.pilar !== st.pilar) {
+          fgCmpSet(root, { pilar: it.pilar });
+          fgCpkRepilar(root, 'cascade', it.pilar);
+          refreshIcons(root);
+        }
+        fgCmpMoreSummary(root);
+      });
+      root.addEventListener('focusout', ev => { if (ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-ev-u')) fgCmpMoreSummary(root); });
+      setTimeout(() => {
+        if (focus === 'note' && noteEl) { noteEl.focus(); return; }
+        if (focus === 'fecha' || focus === 'resp' || focus === 'proyecto') { fgCmpPop(root, focus); if (focus !== 'proyecto') fgCmpFocusChip(root, focus); return; }
+        if (focus === 'more') { fgCmpMore(root, true); return; }
+        name.focus();
+        if (t) { try { name.setSelectionRange(name.value.length, name.value.length); } catch (e) { /* algunos navegadores no lo permiten */ } }
+      }, 60);
+      fgWireForm(el, b => {
+        const st = fgCmpGet(root);
+        const nombre = String(name.value || '').trim();
+        if (!nombre) { name.focus(); return; }
+        if (st.fecha && !/^\d{4}-\d{2}-\d{2}$/.test(st.fecha)) { fgCmpPop(root, 'fecha'); toast('Revisa la fecha', 'error'); return; }
+        if (!fgCheckEvidence(el, 'evidencias')) {
+          fgCmpMore(root, true);
+          const bad = root.querySelector('[data-ev-u][aria-invalid="true"]');
+          if (bad) setTimeout(() => bad.focus(), 30);
+          return;
+        }
+        const cpk = root.querySelector('[data-cpk][data-name="cascade"] [data-cpk-value]');
+        // El estado sólo cambia con taskComplete / taskReopen; el servidor conserva lo no enviado.
+        const payload = {
+          tipo: 'Tarea', pilar: st.pilar, proyecto: st.proyecto, nombre: nombre.slice(0, 300), detalle: noteEl ? String(noteEl.value || '').trim() : '',
+          resp: st.resp, asignados: st.asignados.slice(), fecha: st.fecha, cascade: cpk ? cpk.value : '', evidencias: readEvidence(el, 'evidencias'),
+          avisar: st.avisar, privada: st.asignados.length ? false : st.privada,
+        };
+        // v3.4 (SPEC §18): el formulario se cierra al tiro y el cambio ya se ve; el servidor confirma por detrás
+        if (t) {
+          const patch = { tipo: 'Tarea', id: t.id };
+          Object.keys(payload).forEach(k => { if (k !== 'tipo' && JSON.stringify(payload[k]) !== JSON.stringify(orig[k])) patch[k] = payload[k]; });
+          close();
+          if (Object.keys(patch).length === 2) return;
+          optimistic(() => { const x = IDX.task.get(t.id); if (x) fgApplyTask(x, patch); }, 'gSave', [patch], { reapply: true });
+          toast('Cambios guardados', 'success');
+          return;
+        }
+        payload.estado = 'Pendiente';
+        const me = myEmail();
+        const tmp = Object.assign({
+          id: 'tmp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), cierre: '', completada: '', orden: 0,
+          creadoPor: me, creado: new Date().toISOString(), actualizadoPor: me, actualizado: '',
+        }, payload);
+        delete tmp.tipo;
+        let realId = '';
+        close();
+        optimistic(() => { S.tasks = (S.tasks || []).filter(x => x.id !== tmp.id).concat([tmp]); }, 'gSave', [payload], { reapply: true })
+          .then(r => { if (r && r.lastId) realId = r.lastId; });
+        toast('Tarea creada', 'success', { actionLabel: 'Ver', onAction: () => openTask(realId && IDX.task.get(realId) ? realId : tmp.id) });
+      });
+    },
+  });
+}
+
+/* =====================================================================
+   "¿Cómo te fue?" · comentario de cierre OPCIONAL (SPEC §13.1)
+   Pendiente → taskComplete(id, {cierre, completada, evidencias}) (cierre puede ir vacío).
+   Ya lista (p. ej. desde el toast "Agregar comentario") → gSave con cierre / evidencias (sólo lo que cambió).
+   ===================================================================== */
+function openCompleteTask(id) {
+  if (!fgReady()) return;
+  const t = IDX.task.get(id);
+  if (!t) { toast('No se encontró la tarea', 'error'); return; }
+  const done = t.estado === 'Realizada';
+  const today = todayStr();
+  const evs = done ? fgCleanEv(t.evidencias) : [];
+  const body = '<div class="space-y-3">' +
+    '<textarea id="fg-cierre-' + esc(id) + '" name="cierre" rows="3" maxlength="4000" aria-label="Comentario de cierre (opcional)" placeholder="Opcional: qué se hizo o dónde quedó…" class="' + CX.input + ' resize-y">' + esc(done ? (t.cierre || '') : '') + '</textarea>' +
+    '<div class="flex flex-wrap items-center gap-x-4 gap-y-2">' +
+    '<label class="inline-flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">' + icon('calendar-check', 'size-3.5 shrink-0 text-zinc-400') + 'Lista el' +
+    '<input type="date" name="completada" value="' + esc(done ? (t.completada || today) : today) + '" max="' + today + '" aria-label="Fecha en que quedó lista" class="' + FG_MINI_INPUT + '"></label>' +
+    '<button type="button" data-action="task.links" aria-expanded="' + (evs.length > 0) + '" class="inline-flex items-center gap-1.5 rounded text-xs font-medium text-indigo-600 transition hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400 dark:hover:text-indigo-300">' +
+    icon('paperclip', 'size-3.5 shrink-0') + (evs.length ? 'Links (' + evs.length + ')' : 'Agregar links') + '</button></div>' +
+    '<div data-fg-links' + (evs.length ? '' : ' hidden') + '>' + evidenceEditorHtml('evidencias', evs, { project: t.proyecto && IDX.project.get(t.proyecto) ? t.proyecto : '' }) + '</div>' +
+    '</div>';
+  openModal({
+    size: 'md',
+    title: '¿Cómo te fue?',
+    subtitle: esc(t.nombre),
+    iconHtml: '<div class="grid size-10 shrink-0 place-items-center rounded-full bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400">' + icon(done ? 'message-square-text' : 'party-popper', 'size-5') + '</div>',
+    body: body,
+    footer: fgSaveHint() + btn({ label: 'Cancelar', variant: 'ghost', action: 'modal.close' }) +
+      btn({ label: done ? 'Guardar' : 'Marcar como lista', icon: 'check', variant: 'success', attrs: 'data-fg-save' }),
+    onMount: (el, close) => {
+      fgWireForm(el, b => {
+        const cur = IDX.task.get(id);
+        if (!cur) { toast('La tarea ya no existe', 'error'); close(); return; }
+        const ta = el.querySelector('[name="cierre"]');
+        const di = el.querySelector('[name="completada"]');
+        const cierre = String(ta.value || '').trim();
+        const comp = String(di.value || '').trim() || todayStr();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(comp)) { fgInvalid(di, 'Fecha no válida'); return; }
+        if (comp > todayStr()) { fgInvalid(di, 'La fecha no puede ser futura'); return; }
+        if (!fgCheckEvidence(el, 'evidencias')) {
+          const box = el.querySelector('[data-fg-links]');
+          if (box) box.hidden = false;
+          return;
+        }
+        const evList = readEvidence(el, 'evidencias');
+        // v3.4 (SPEC §18): se cierra al tiro y la tarea cambia en pantalla; el servidor confirma por detrás
+        if (cur.estado !== 'Realizada') {
+          const done = { estado: 'Realizada', completada: comp, cierre: cierre, evidencias: evList };
+          close();
+          optimistic(() => { const x = IDX.task.get(id); if (x) fgApplyTask(x, done); }, 'taskComplete', [id, { cierre: cierre, completada: comp, evidencias: evList }], { reapply: true });
+          toast('¡Lista! Una menos', 'success');
+          return;
+        }
+        // Ya estaba lista: sólo se guarda lo que cambió
+        const over = { cierre: cierre, evidencias: evList };
+        if (comp !== (cur.completada || '')) over.completada = comp;
+        if (cierre === (cur.cierre || '') && !over.completada && JSON.stringify(evList) === JSON.stringify(fgCleanEv(cur.evidencias))) { close(); return; }
+        close();
+        optimistic(() => { const x = IDX.task.get(id); if (x) fgApplyTask(x, over); }, 'gSave', [Object.assign({ tipo: 'Tarea', id: id }, over)], { reapply: true });
+        toast(cierre ? 'Comentario guardado' : 'Cambios guardados', 'success');
+      });
+    },
+  });
+}
+
+/* =====================================================================
+   cascadePickerHtml({name, pilar, value, hint}) — selector inline (SPEC §7)
+   ===================================================================== */
+function fgCpkTriggerInner(val, pk) {
+  const chev = icon('chevron-down', 'size-4 shrink-0 text-zinc-400 transition group-aria-expanded:rotate-180');
+  const it = val ? IDX.cascade.get(val) : null;
+  if (!it) {
+    return '<span class="grid size-7 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500">' + icon('target', 'size-4') + '</span>' +
+      '<span class="min-w-0 flex-1 truncate text-zinc-500 dark:text-zinc-400">Sin indicador Cascade</span>' + chev;
+  }
+  const m = CLASE_META[it.clase] || CLASE_META.accion;
+  const g = it.padre ? IDX.cascade.get(it.padre) : null;
+  const other = pk && it.pilar && it.pilar !== pk ? PIL(it.pilar) : null;
+  return '<span class="grid size-7 shrink-0 place-items-center rounded-md ' + tone(m.tone).iconbox + '">' + icon(m.icon, 'size-4') + '</span>' +
+    '<span class="min-w-0 flex-1"><span class="block truncate text-[11px] leading-tight text-zinc-500 dark:text-zinc-400">' + esc((g ? g.nombre + ' ›' : '') + (other ? (g ? ' · ' : '') + other.label : '')) + '</span>' +
+    '<span class="block truncate font-medium leading-snug text-zinc-900 dark:text-zinc-100">' + esc(it.nombre) + '</span></span>' +
+    '<span class="hidden sm:inline-flex">' + badge(m.label, m.tone) + '</span>' + chev;
+}
+function fgCpkOption(c, val, g) {
+  const sel = c.id === val;
+  const m = CLASE_META[c.clase] || CLASE_META.accion;
+  const q = normTxt([c.nombre, g ? g.nombre : '', g ? g.etiqueta : '', m.label].join(' '));
+  return '<button type="button" role="option" aria-selected="' + (sel ? 'true' : 'false') + '" data-action="cascade.picker.pick" data-value="' + esc(c.id) + '" data-cpk-opt data-group="' + esc(g ? g.id : '') + '" data-q="' + esc(q) + '"' +
+    ' class="flex w-full items-center gap-2.5 rounded-lg py-1.5 pl-3 pr-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500/60 ' +
+    (sel ? 'bg-indigo-50 text-indigo-900 dark:bg-indigo-500/15 dark:text-indigo-100' : 'text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800') + '">' +
+    icon(m.icon, 'size-4 shrink-0 ' + tone(m.tone).text) + '<span class="min-w-0 flex-1 break-words">' + esc(c.nombre) + '</span>' +
+    '<span class="shrink-0">' + badge(m.label, m.tone) + '</span>' +
+    (sel ? icon('check', 'size-4 shrink-0 text-indigo-600 dark:text-indigo-400') : '<span class="size-4 shrink-0"></span>') + '</button>';
+}
+function fgCpkListHtml(pk, val, all) {
+  const keys = all ? [pk].concat(S.pillars.map(p => p.key).filter(k => k !== pk)).filter(Boolean) : [pk];
+  let h = '<button type="button" role="option" aria-selected="' + (val ? 'false' : 'true') + '" data-action="cascade.picker.pick" data-value="" data-cpk-opt data-cpk-none data-q=""' +
+    ' class="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500/60 ' +
+    (val ? 'text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800' : 'bg-indigo-50 text-indigo-900 dark:bg-indigo-500/15 dark:text-indigo-100') + '">' +
+    icon('circle-x', 'size-4 shrink-0 text-zinc-400') + '<span class="flex-1">Sin indicador</span>' + (val ? '' : icon('check', 'size-4 shrink-0 text-indigo-600 dark:text-indigo-400')) + '</button>';
+  let any = false;
+  keys.forEach(k => {
+    const groups = (IDX.cascadeGroups && IDX.cascadeGroups[k]) || [];
+    const withKids = groups.filter(g => (IDX.cascadeChildren.get(g.id) || []).length);
+    if (!withKids.length) return;
+    any = true;
+    if (all) {
+      const pl = PIL(k);
+      h += '<div data-cpk-pillar="' + esc(k) + '" role="presentation" class="mt-2 flex items-center gap-1.5 border-t border-zinc-100 px-2 pt-2.5 text-xs font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-200">' +
+        (pl ? icon(pl.icon, 'size-3.5 shrink-0 ' + pl.tone.text) + esc(pl.label) : esc(k)) + '</div>';
+    }
+    withKids.forEach(g => {
+      h += '<div data-cpk-group="' + esc(g.id) + '" data-pillar="' + esc(k) + '" role="presentation" class="flex items-start gap-2 px-2 pb-1 pt-3">' +
+        '<span class="min-w-0 flex-1 text-[11px] font-semibold uppercase leading-snug tracking-wide text-zinc-500 dark:text-zinc-400">' + esc(g.nombre) + '</span></div>';
+      (IDX.cascadeChildren.get(g.id) || []).forEach(c => { h += fgCpkOption(c, val, g); });
+    });
+  });
+  if (!any) {
+    h += '<div class="px-3 py-6 text-center text-sm text-zinc-500 dark:text-zinc-400">' + (all ? 'Aún no hay indicadores.' : 'Sin indicadores en este pilar.') + '</div>';
+  }
+  h += '<p data-cpk-empty hidden class="px-3 py-6 text-center text-sm text-zinc-500 dark:text-zinc-400">Sin resultados.' + (all ? '' : ' Prueba con «Ver otros pilares».') + '</p>';
+  return h;
+}
+function cascadePickerHtml(o) {
+  o = o || {};
+  const name = o.name || 'cascade';
+  const pk = fgPilarKey(o.pilar);
+  const it = o.value && IDX.cascade ? IDX.cascade.get(o.value) : null;
+  const val = it ? it.id : '';
+  const all = !pk || !!(it && it.pilar && it.pilar !== pk);
+  const hint = o.hint || '';
+  return '<div class="min-w-0" data-cpk data-name="' + esc(name) + '" data-pilar="' + esc(pk) + '" data-all="' + (all ? '1' : '0') + '">' +
+    '<input type="hidden" name="' + esc(name) + '" value="' + esc(val) + '" data-cpk-value>' +
+    '<button type="button" data-action="cascade.picker.toggle" data-cpk-trigger aria-expanded="false" aria-haspopup="listbox" aria-label="Elegir indicador Cascade"' +
+    ' class="group flex w-full min-w-0 items-center gap-2.5 rounded-lg bg-white px-2.5 py-2 text-left text-sm shadow-sm ring-1 ring-inset ring-zinc-300 transition hover:ring-zinc-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:bg-zinc-800/70 dark:ring-zinc-700 dark:hover:ring-zinc-600 dark:focus-visible:ring-indigo-400">' +
+    fgCpkTriggerInner(val, pk) + '</button>' +
+    '<div data-cpk-panel hidden class="mt-2 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm anim-fade-in dark:border-zinc-700 dark:bg-zinc-900">' +
+    '<div class="border-b border-zinc-100 p-2 dark:border-zinc-800"><div class="relative"><span class="pointer-events-none absolute inset-y-0 left-2.5 grid place-items-center text-zinc-400">' + icon('search', 'size-4') + '</span>' +
+    '<input type="search" data-cpk-search data-input="cascade.picker.search" autocomplete="off" placeholder="Buscar indicador o acción…" aria-label="Buscar indicador Cascade" class="' + CX.input + ' pl-8"></div></div>' +
+    '<div data-cpk-list role="listbox" class="relative max-h-72 overflow-y-auto overscroll-contain p-1.5">' + fgCpkListHtml(pk, val, all) + '</div>' +
+    '<div class="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 bg-zinc-50/70 px-3 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-900/60">' +
+    '<label class="inline-flex cursor-pointer select-none items-center gap-2 text-zinc-600 dark:text-zinc-300"><input type="checkbox" data-change="cascade.picker.all" class="size-3.5 accent-indigo-600"' + (all ? ' checked' : '') + (pk ? '' : ' disabled') + '>Ver otros pilares</label>' +
+    '<button type="button" data-action="cascade.picker.manage" class="inline-flex items-center gap-1 rounded font-medium text-indigo-600 transition hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400 dark:hover:text-indigo-300">' + icon('settings', 'size-3.5') + 'Administrar indicadores</button>' +
+    '</div></div>' +
+    (hint ? '<p data-cpk-hint class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">' + esc(hint) + '</p>' : '') +
+    '</div>';
+}
+function fgCpkRoot(el) { return el && el.closest ? el.closest('[data-cpk]') : null; }
+function fgCpkSetOpen(root, open) {
+  const panel = root.querySelector('[data-cpk-panel]');
+  const trig = root.querySelector('[data-cpk-trigger]');
+  if (!panel) return;
+  panel.hidden = !open;
+  if (trig) trig.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (!open) return;
+  fgCpkWire(root);
+  const list = root.querySelector('[data-cpk-list]');
+  const sel = root.querySelector('[data-cpk-opt][aria-selected="true"]:not([data-cpk-none])');
+  if (list && sel) list.scrollTop = Math.max(0, sel.offsetTop - list.clientHeight / 2);
+  setTimeout(() => {
+    if (panel.scrollIntoView) panel.scrollIntoView({ block: 'nearest' });
+    const s = root.querySelector('[data-cpk-search]');
+    if (s) s.focus({ preventScroll: true });
+  }, 20);
+}
+function fgCpkSet(root, val) {
+  const inp = root.querySelector('[data-cpk-value]');
+  if (!inp) return;
+  const it = val ? IDX.cascade.get(val) : null;
+  val = it ? it.id : '';
+  if (it && it.pilar && root.dataset.pilar && it.pilar !== root.dataset.pilar) {
+    root.dataset.all = '1';
+    const cb = root.querySelector('[data-change="cascade.picker.all"]');
+    if (cb) cb.checked = true;
+  }
+  inp.value = val;
+  root.querySelector('[data-cpk-trigger]').innerHTML = fgCpkTriggerInner(val, root.dataset.pilar);
+  root.querySelector('[data-cpk-list]').innerHTML = fgCpkListHtml(root.dataset.pilar, val, root.dataset.all === '1');
+  const s = root.querySelector('[data-cpk-search]');
+  if (s) s.value = '';
+  refreshIcons(root);
+  inp.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function fgCpkFilter(root, q) {
+  const terms = normTxt(q).split(/\s+/).filter(Boolean);
+  const vis = {};
+  const pil = {};
+  let shown = 0;
+  root.querySelectorAll('[data-cpk-opt]').forEach(o => {
+    if (o.hasAttribute('data-cpk-none')) { o.hidden = terms.length > 0; return; }
+    const ok = terms.every(t => (o.dataset.q || '').indexOf(t) >= 0);
+    o.hidden = !ok;
+    if (ok) { shown++; vis[o.dataset.group] = 1; }
+  });
+  root.querySelectorAll('[data-cpk-group]').forEach(g => {
+    const on = !!vis[g.dataset.cpkGroup];
+    g.hidden = !on;
+    if (on) pil[g.dataset.pillar] = 1;
+  });
+  root.querySelectorAll('[data-cpk-pillar]').forEach(h => { h.hidden = !pil[h.dataset.cpkPillar]; });
+  const e = root.querySelector('[data-cpk-empty]');
+  if (e) e.hidden = !terms.length || shown > 0;
+}
+// Teclado del panel: ↑/↓ entre opciones, Enter en la búsqueda elige la primera, Esc cierra el panel (no el modal).
+function fgCpkWire(root) {
+  if (root.dataset.wired) return;
+  root.dataset.wired = '1';
+  root.addEventListener('keydown', ev => {
+    const panel = root.querySelector('[data-cpk-panel]');
+    if (!panel || panel.hidden) return;
+    const k = ev.key;
+    if (k === 'Escape') {
+      ev.preventDefault(); ev.stopPropagation();
+      fgCpkSetOpen(root, false);
+      const tr = root.querySelector('[data-cpk-trigger]'); if (tr) tr.focus();
+      return;
+    }
+    if (k !== 'ArrowDown' && k !== 'ArrowUp' && k !== 'Enter') return;
+    const opts = Array.prototype.slice.call(root.querySelectorAll('[data-cpk-opt]')).filter(o => !o.hidden);
+    const inSearch = ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-cpk-search');
+    if (k === 'Enter') {
+      if (!inSearch) return;
+      ev.preventDefault(); ev.stopPropagation();
+      const first = opts.find(o => o.dataset.value) || opts[0];
+      if (first && ev.target.value.trim()) first.click();
+      return;
+    }
+    ev.preventDefault();
+    const i = opts.indexOf(document.activeElement);
+    const n = k === 'ArrowDown' ? i + 1 : i - 1;
+    if (n < 0) { const s = root.querySelector('[data-cpk-search]'); if (s) s.focus(); return; }
+    const target = opts[Math.min(n, opts.length - 1)];
+    if (target) { target.focus(); if (target.scrollIntoView) target.scrollIntoView({ block: 'nearest' }); }
+  });
+}
+// Re-dibuja el selector con otro pilar (conserva el valor sólo si es del nuevo pilar).
+function fgCpkRepilar(scope, name, pk) {
+  const root = scope.querySelector('[data-cpk][data-name="' + name + '"]');
+  if (!root) return;
+  const inp = root.querySelector('[data-cpk-value]');
+  const it = inp && inp.value ? IDX.cascade.get(inp.value) : null;
+  const keep = it && it.pilar === pk ? it.id : '';
+  const h = root.querySelector('[data-cpk-hint]');
+  root.outerHTML = cascadePickerHtml({ name: name, pilar: pk, value: keep, hint: h ? h.textContent : '' });
+}
+
+/* =====================================================================
+   evidenceEditorHtml(name, list, {project}) / readEvidence(root, name)
+   Con proyecto (o dentro del compositor con un proyecto elegido): «Subir archivo» sube a su carpeta de
+   Drive (driveUpload) y agrega {t: nombre, u: url} como link. Mientras sube, no se puede guardar.
+   ===================================================================== */
+function fgFixUrl(v) {
+  v = String(v || '').trim();
+  if (!v || /^https?:\/\//i.test(v)) return v;
+  if (!/\s/.test(v) && /^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(\/|$|\?)/i.test(v)) return 'https://' + v;
+  return v;
+}
+function fgEvAutoTitle(u) { return FG_EV_NAMES[evidenceIcon(u)] || shortUrl(u); }
+function fgEvIconHtml(u) {
+  return '<span data-ev-icon class="mt-1 grid size-7 shrink-0 place-items-center rounded-md ' +
+    (u ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300' : 'bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500') + '" aria-hidden="true">' +
+    icon(u ? evidenceIcon(u) : 'link', 'size-3.5') + '</span>';
+}
+function fgEvRow(e) {
+  e = e || {};
+  const u = safeUrl(e.u) || '';
+  return '<div data-ev-row class="flex items-start gap-2 anim-fade-in">' + fgEvIconHtml(u) +
+    '<div class="grid min-w-0 flex-1 grid-cols-1 gap-2 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">' +
+    '<input type="text" data-ev-t data-input="evidence.title" value="' + esc(e.t || '') + '" maxlength="200" autocomplete="off" placeholder="Título (ej. Informe bonos de carbono)" aria-label="Título del link" class="' + CX.input + '">' +
+    '<div class="min-w-0"><input type="url" inputmode="url" data-ev-u data-input="evidence.url" data-change="evidence.check" value="' + esc(u || e.u || '') + '" autocomplete="off" spellcheck="false" placeholder="https://drive.google.com/…" aria-label="URL del link" class="' + CX.input + '">' +
+    '<p data-ev-err hidden class="mt-1 text-xs font-medium text-red-600 dark:text-red-400">Pega un link válido que empiece con https://</p></div></div>' +
+    iconBtn({ icon: 'x', action: 'evidence.remove', title: 'Quitar link', cls: 'mt-0.5' }) + '</div>';
+}
+const FG_EV_BTN = 'inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium text-indigo-600 transition hover:bg-indigo-50 hover:text-indigo-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-indigo-400 dark:hover:bg-indigo-500/10';
+function evidenceEditorHtml(name, list, o) {
+  name = name || 'evidencias';
+  o = o || {};
+  const rows = fgCleanEv(list).map(e => fgEvRow(e));
+  if (!rows.length) rows.push(fgEvRow({}));
+  const up = !!o.project && !FG_STATE.driveOff && fgDriveOn();
+  return '<div data-ev-editor data-name="' + esc(name) + '" data-project="' + esc(o.project || '') + '">' +
+    '<div data-ev-rows class="space-y-2">' + rows.join('') + '</div>' +
+    '<div class="mt-2 flex flex-wrap items-center gap-1">' +
+    '<button type="button" data-action="evidence.add" class="' + FG_EV_BTN + '">' + icon('plus', 'size-3.5') + 'Agregar link</button>' +
+    '<button type="button" data-action="evidence.upload" title="Sube el archivo a la carpeta de Drive del proyecto"' + (up ? '' : ' hidden') + ' class="' + FG_EV_BTN + '">' + icon('upload', 'size-3.5') + 'Subir archivo</button>' +
+    '</div></div>';
+}
+// Proyecto al que sube el editor: en el compositor, el elegido en ese momento; si no, el del editor.
+function fgEvProject(ed) {
+  if (!ed) return '';
+  const cmp = fgCmpRoot(ed);
+  if (cmp) { const i = cmp.querySelector('[data-fg-st][name="proyecto"]'); return i ? i.value : ''; }
+  return (ed.dataset && ed.dataset.project) || '';
+}
+// Muestra / oculta «Subir archivo» según haya proyecto (el compositor lo llama al cambiar de proyecto)
+function fgEvSyncUpload(scope) {
+  if (!scope || !scope.querySelectorAll) return;
+  scope.querySelectorAll('[data-ev-editor]').forEach(ed => {
+    const b = ed.querySelector('[data-action="evidence.upload"]');
+    if (b) b.hidden = !fgEvProject(ed) || FG_STATE.driveOff || !fgDriveOn();
+  });
+}
+function fgEvBlank(r) {
+  const u = r.querySelector('[data-ev-u]'), t = r.querySelector('[data-ev-t]');
+  return !(u && String(u.value || '').trim()) && !(t && String(t.value || '').trim());
+}
+// {t, u} del archivo recién subido (null si Drive no devolvió un link válido)
+function fgEvFromUpload(r, file) {
+  const u = safeUrl(r && r.url);
+  if (!u) return null;
+  const t = String((r && r.name) || (file && file.name) || '').trim().slice(0, 200);
+  return { t: t || shortUrl(u), u: u };
+}
+// Fila «Subiendo…» al final del editor; devuelve el nodo para reemplazarlo después
+function fgEvPendingRow(ed, name) {
+  const rows = ed.querySelector('[data-ev-rows]');
+  rows.insertAdjacentHTML('beforeend', '<div data-ev-pending class="flex items-center gap-2 py-1.5 pl-1 text-xs text-zinc-500 dark:text-zinc-400">' +
+    icon('loader-circle', 'size-3.5 shrink-0 animate-spin') + '<span class="min-w-0 truncate">Subiendo «' + esc(fgClip(name, 60)) + '» a Drive…</span></div>');
+  const row = rows.lastElementChild;
+  refreshIcons(row);
+  return row;
+}
+// Reemplaza la fila «Subiendo…» por el link (y quita la fila vacía que trae el editor por defecto)
+function fgEvPlace(ed, pending, ev) {
+  const rows = ed.querySelector('[data-ev-rows]');
+  if (!rows) return;
+  const blank = Array.prototype.slice.call(rows.querySelectorAll('[data-ev-row]')).find(fgEvBlank);
+  if (blank) blank.remove();
+  if (pending && pending.parentNode) { pending.insertAdjacentHTML('beforebegin', fgEvRow(ev)); pending.remove(); }
+  else rows.insertAdjacentHTML('beforeend', fgEvRow(ev));
+  refreshIcons(rows);
+  const cmp = fgCmpRoot(ed);
+  if (cmp) fgCmpMoreSummary(cmp);
+}
+// Sube cada archivo a la carpeta del proyecto y lo agrega como link del editor. Uno a la vez: si el proyecto aún
+// no tiene carpeta, la primera subida la crea (dos en paralelo podrían crear dos carpetas).
+function fgEvUpload(ed, pid, files) {
+  if (!ed || !pid) return Promise.resolve([]);
+  const jobs = [], out = [];
+  Array.prototype.slice.call(files || []).forEach(f => {
+    if (fgDriveTooBig(f)) { toast('«' + fgClip(f.name, 40) + '» ' + fgDriveBigMsg(f, false), 'error'); return; }
+    jobs.push({ f: f, row: fgEvPendingRow(ed, (f && f.name) || 'archivo') });
+  });
+  return jobs.reduce((prev, j) => prev.then(() => fgDriveSend(pid, j.f).then(r => {
+    const ev = fgEvFromUpload(r, j.f);
+    if (!ev) throw new Error('Drive no devolvió el link del archivo');
+    fgEvPlace(ed, j.row, ev);
+    fgDriveAdded(pid, r);
+    out.push(ev);
+  }).catch(err => { if (j.row && j.row.parentNode) j.row.remove(); toast(errMsg(err), 'error'); })), Promise.resolve()).then(() => out);
+}
+function fgEvEditor(root, name) {
+  root = root || document;
+  if (root.matches && root.matches('[data-ev-editor]') && (!name || root.dataset.name === name)) return root;
+  const all = root.querySelectorAll('[data-ev-editor]');
+  for (let i = 0; i < all.length; i++) if (!name || all[i].dataset.name === name) return all[i];
+  return null;
+}
+function readEvidence(root, name) {
+  const ed = fgEvEditor(root, name);
+  if (!ed) return [];
+  const seen = {};
+  const out = [];
+  ed.querySelectorAll('[data-ev-row]').forEach(r => {
+    const ui = r.querySelector('[data-ev-u]'), ti = r.querySelector('[data-ev-t]');
+    const u = safeUrl(fgFixUrl(ui ? ui.value : ''));
+    if (!u || seen[u]) return;
+    seen[u] = 1;
+    const t = String(ti ? ti.value : '').trim().slice(0, 200);
+    out.push({ t: t || shortUrl(u), u: u });
+  });
+  return out;
+}
+function fgEvSetErr(input, on, msg) {
+  const p = input.parentElement ? input.parentElement.querySelector('[data-ev-err]') : null;
+  if (on) { input.style.setProperty('--tw-ring-color', FG_RED); input.setAttribute('aria-invalid', 'true'); }
+  else { input.style.removeProperty('--tw-ring-color'); input.removeAttribute('aria-invalid'); }
+  if (p) { if (msg) p.textContent = msg; p.hidden = !on; }
+}
+function fgEvSetIcon(row, u) {
+  const box = row.querySelector('[data-ev-icon]');
+  if (!box) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = fgEvIconHtml(u);
+  const n = tmp.firstChild;
+  box.replaceWith(n);
+  refreshIcons(n);
+}
+// Valida antes de guardar: links mal escritos o títulos sin link. Devuelve true si todo está bien.
+function fgCheckEvidence(root, name) {
+  const ed = fgEvEditor(root, name);
+  if (!ed) return true;
+  if (ed.querySelector('[data-ev-pending]')) { toast('Espera a que termine de subir el archivo', 'info'); return false; }
+  let first = null;
+  ed.querySelectorAll('[data-ev-row]').forEach(r => {
+    const ui = r.querySelector('[data-ev-u]'), ti = r.querySelector('[data-ev-t]');
+    if (!ui) return;
+    const fixed = fgFixUrl(ui.value);
+    if (fixed !== ui.value.trim()) ui.value = fixed;
+    let bad = '';
+    if (fixed && !safeUrl(fixed)) bad = 'Pega un link válido que empiece con https://';
+    else if (!fixed && ti && ti.value.trim()) bad = 'Falta el link para este título';
+    fgEvSetErr(ui, !!bad, bad);
+    if (bad && !first) first = ui;
+  });
+  if (first) { toast('Revisa los links marcados en rojo', 'error'); first.focus(); return false; }
+  return true;
+}
+
+/* =====================================================================
+   Pestaña «Drive» del proyecto (SPEC §14.3) · carpeta <raíz>/<Pilar>/<Proyecto> en el drive compartido
+   Caché por proyecto en S.ui.forms.drive[pid] = {status: 'loading'|'ok'|'error'|'off', data: {folder, files}, error,
+   at, seq, loading, creating, uploads: [{uid, name, size, status: 'queued'|'uploading'|'error', error, big}], working, okBatch}.
+   Se pide al abrir la pestaña (no en cada redibujo: vence a los 3 min o con «Actualizar») y sólo se repinta el panel.
+   ===================================================================== */
+function fgDriveCache() { const ui = fgUi(); ui.drive = ui.drive || {}; return ui.drive; }
+function fgDriveGet(pid) { return (pid && fgDriveCache()[pid]) || null; }
+function fgDriveEntry(pid) {
+  const c = fgDriveCache();
+  return c[pid] || (c[pid] = { status: 'loading', data: null, error: '', at: 0, seq: 0, loading: false, creating: false, uploads: [], working: null, okBatch: 0 });
+}
+// Drive sin carpeta raíz: driveList responde {configured:false} o un error que lo dice
+function fgDriveIsOff(msg) { return /configur|falta conectar|carpeta ra[ií]z|DRIVE_ROOT/i.test(String(msg || '')); }
+function fgDriveTooBig(f) { return !!f && Number(f.size) > FG_DRIVE_MAX; }
+// 850 KB · 1,2 MB (sin depender del locale)
+function fgBytes(n) {
+  n = Number(n) || 0;
+  if (n <= 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return Math.max(1, Math.round(n / 1024)) + ' KB';
+  return String(Math.round(n / 104857.6) / 10).replace('.', ',') + ' MB';
+}
+// Archivo sobre el límite: mensaje amable que sugiere subirlo directo en la carpeta (en la pestaña va seguido del link
+// «Abrir carpeta»; desde un editor de links se explica dónde está)
+function fgDriveBigMsg(f, inTab) {
+  return (inTab ? 'Pesa ' : 'pesa ') + fgBytes(f && f.size) + ' (máx. 20 MB): ' +
+    (inTab ? 'súbelo directo en la carpeta.' : 'súbelo directo con «Abrir carpeta», en la pestaña Drive del proyecto.');
+}
+function fgDriveFolderUrl(p, folder) {
+  return safeUrl((folder && folder.url) || (p && p.carpetaUrl) || (p && p.carpeta ? 'https://drive.google.com/drive/folders/' + p.carpeta : ''));
+}
+// FileReader → base64 sin el prefijo «data:…;base64,»
+function fgStripB64(s) {
+  s = String(s == null ? '' : s);
+  const i = s.indexOf(',');
+  return /^data:/i.test(s) && i >= 0 ? s.slice(i + 1) : s;
+}
+function fgReadB64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(fgStripB64(r.result));
+    r.onerror = () => reject(new Error('No pude leer «' + ((file && file.name) || 'el archivo') + '»'));
+    r.readAsDataURL(file);
+  });
+}
+// Un archivo → driveUpload(pid, {name, mimeType, base64}) → entrada de archivo {id, name, url, …}
+function fgDriveSend(pid, file) {
+  return fgReadB64(file).then(b64 => run('driveUpload', pid, {
+    name: String((file && file.name) || 'archivo'), mimeType: String((file && file.type) || 'application/octet-stream'), base64: b64,
+  }));
+}
+// Un archivo recién subido (desde la pestaña o desde un editor de links) entra a la lista en caché
+function fgDriveAdded(pid, r) {
+  const e = fgDriveGet(pid);
+  if (!e || !r || !r.id) return;
+  if (e.data) e.data.files = [r].concat((e.data.files || []).filter(x => x.id !== r.id));
+  e.at = 0; // el próximo vistazo trae la carpeta y el orden del servidor
+}
+// Carga (o recarga) la lista; no pinta al pedir (puede llamarse mientras se dibuja el drawer), sí al responder
+function fgDriveLoad(pid) {
+  const e = fgDriveEntry(pid);
+  const seq = ++e.seq;
+  e.loading = true;
+  if (!e.data && e.status !== 'off') e.status = 'loading';
+  return run('driveList', pid).then(r => {
+    if (e.seq !== seq) return;
+    e.loading = false; e.at = Date.now(); e.error = '';
+    if (r && r.configured === false) { e.status = 'off'; e.data = null; FG_STATE.driveOff = true; }
+    else {
+      e.status = 'ok'; FG_STATE.driveOff = false;
+      e.data = { folder: (r && r.folder) || null, files: Array.isArray(r && r.files) ? r.files : [] };
+    }
+    fgDrivePaint(pid);
+  }, err => {
+    if (e.seq !== seq) return;
+    e.loading = false; e.at = Date.now();
+    const m = errMsg(err);
+    if (fgDriveIsOff(m)) { e.status = 'off'; e.data = null; FG_STATE.driveOff = true; }
+    else if (e.data) { e.status = 'ok'; toast(m, 'error'); } // se conserva la última lista
+    else { e.status = 'error'; e.error = m; }
+    fgDrivePaint(pid);
+  });
+}
+// Al abrir la pestaña: pide la lista si no hay caché o venció (nunca dos pedidos a la vez)
+function fgDriveEnsure(pid) {
+  const e = fgDriveGet(pid);
+  if (e && (e.loading || (e.at && Date.now() - e.at < FG_DRIVE_TTL))) return;
+  fgDriveLoad(pid);
+}
+function fgDrivePaint(pid) {
+  if (typeof document === 'undefined' || !/^[\w-]+$/.test(String(pid || ''))) return;
+  const box = document.querySelector('#drawer-root [data-fg-drive="' + pid + '"]');
+  const p = IDX.project.get(pid);
+  if (!box || !p) return;
+  box.innerHTML = fgDriveBody(p);
+  refreshIcons(box);
+}
+function fgDrivePanel(p) {
+  return '<div data-fg-drive="' + esc(p.id) + '" data-fg-drop="' + esc(p.id) + '" class="group/drop min-h-40">' + fgDriveBody(p) + '</div>';
+}
+function fgDriveOffHtml() {
+  const admin = typeof isAdminUI === 'function' ? isAdminUI() : !!(S.me && S.me.admin);
+  if (!admin) return '<p class="py-2 text-sm text-zinc-500 dark:text-zinc-400">Drive aún no está conectado a la app.</p>';
+  return '<div class="flex flex-col items-center gap-4 px-4 py-10 text-center">' +
+    '<div class="grid size-12 place-items-center rounded-2xl bg-zinc-100 text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500">' + icon('hard-drive', 'size-6') + '</div>' +
+    btn({ label: 'Configura la carpeta raíz en Ajustes', icon: 'settings', variant: 'primary', action: 'project.drive.setup' }) + '</div>';
+}
+function fgDriveFileRow(f) {
+  const k = FG_DRIVE_KIND[f && f.kind] || FG_DRIVE_KIND.file;
+  const u = safeUrl(f && f.url);
+  const meta = [f.updated ? fmtRel(f.updated) : '', fgBytes(f.size)].filter(Boolean).join(' · ');
+  const inner = '<span class="grid size-8 shrink-0 place-items-center rounded-lg bg-zinc-100 dark:bg-zinc-800 ' + tone(k[1]).text + '">' + icon(k[0], 'size-4') + '</span>' +
+    '<span class="min-w-0 flex-1"><span class="block truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">' + esc(f.name || 'Sin nombre') + '</span>' +
+    (meta ? '<span class="block text-xs tabular-nums text-zinc-500 dark:text-zinc-400"' + (f.updated ? ' title="' + esc(fmtDateTime(f.updated)) + '"' : '') + '>' + esc(meta) + '</span>' : '') + '</span>';
+  if (!u) return '<li class="flex items-center gap-3 px-2 py-2">' + inner + '</li>';
+  return '<li><a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer" title="Abrir en Drive" class="group flex items-center gap-3 rounded-lg px-2 py-2 transition hover:bg-zinc-100/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:bg-zinc-800/50">' +
+    inner + icon('arrow-up-right', 'size-4 shrink-0 text-zinc-400 opacity-0 transition group-hover:opacity-100 group-focus-visible:opacity-100') + '</a></li>';
+}
+// Filas de subida en curso / en cola / con error (las listas salen de aquí y entran a la lista de archivos)
+function fgDriveUploadsHtml(pid, e, url) {
+  const ups = (e && e.uploads) || [];
+  if (!ups.length) return '';
+  return '<ul class="mb-3 space-y-1.5" aria-live="polite">' + ups.map(u => {
+    const err = u.status === 'error';
+    const ic = u.status === 'uploading' ? icon('loader-circle', 'size-4 shrink-0 animate-spin text-indigo-500 dark:text-indigo-400')
+      : err ? icon('circle-alert', 'size-4 shrink-0 text-red-500 dark:text-red-400') : icon('clock', 'size-4 shrink-0 text-zinc-400');
+    const st = u.status === 'uploading' ? 'Subiendo…' : err ? '' : 'En cola';
+    return '<li data-fg-up="' + esc(u.status) + '" class="flex items-start gap-2.5 rounded-lg border px-3 py-2 text-sm ' +
+      (err ? 'border-red-200 bg-red-50/60 dark:border-red-500/30 dark:bg-red-500/10' : 'border-zinc-200 bg-zinc-50/80 dark:border-zinc-800 dark:bg-zinc-800/40') + '">' +
+      '<span class="mt-0.5 flex">' + ic + '</span><div class="min-w-0 flex-1"><div class="flex items-baseline gap-2">' +
+      '<span class="min-w-0 flex-1 truncate font-medium text-zinc-800 dark:text-zinc-100">' + esc(u.name) + '</span>' +
+      '<span class="shrink-0 text-xs tabular-nums text-zinc-500 dark:text-zinc-400">' + esc([fgBytes(u.size), st].filter(Boolean).join(' · ')) + '</span></div>' +
+      (err ? '<p class="mt-0.5 text-xs text-red-700 dark:text-red-300">' + esc(u.error) +
+        (u.big && url ? ' <a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer" class="font-medium underline underline-offset-2">Abrir carpeta</a>' : '') + '</p>' : '') +
+      '</div>' + (err ? iconBtn({ icon: 'x', action: 'project.drive.dismiss', data: { id: pid, uid: u.uid }, title: 'Quitar', cls: '-my-1 -mr-1 size-7' }) : '') + '</li>';
+  }).join('') + '</ul>';
+}
+function fgDriveBody(p) {
+  const e = fgDriveGet(p.id);
+  if (e && e.status === 'off') return fgDriveOffHtml();
+  if (!e || (!e.data && e.status === 'loading')) return '<div class="pt-1" aria-busy="true">' + skeleton(4) + '</div>';
+  if (!e.data) {
+    return '<div class="flex flex-col items-start gap-2 py-2"><p class="text-sm text-zinc-600 dark:text-zinc-300">No pude cargar los archivos de Drive.</p>' +
+      (e.error ? '<p class="text-xs text-zinc-500 dark:text-zinc-400">' + esc(e.error) + '</p>' : '') +
+      btn({ label: 'Reintentar', icon: 'refresh-cw', size: 'sm', variant: 'secondary', action: 'project.drive.refresh', data: { id: p.id } }) + '</div>';
+  }
+  const files = e.data.files || [];
+  const url = fgDriveFolderUrl(p, e.data.folder);
+  const bar = '<div class="mb-3 flex flex-wrap items-center gap-2">' +
+    btn({ label: 'Subir archivos', icon: 'upload', size: 'sm', variant: 'primary', action: 'project.drive.choose', data: { id: p.id }, title: 'Subir archivos (hasta 20 MB cada uno)' }) +
+    (url
+      ? btn({ label: 'Abrir carpeta', icon: 'folder-open', size: 'sm', variant: 'secondary', href: url, external: true, title: 'Abrir la carpeta en Google Drive' })
+      : btn({ label: e.creating ? 'Creando…' : 'Crear carpeta', icon: 'folder-plus', size: 'sm', variant: 'secondary', action: 'project.drive.folder', data: { id: p.id }, disabled: !!e.creating })) +
+    '<span class="flex-1"></span>' +
+    iconBtn({ icon: 'refresh-cw', action: 'project.drive.refresh', data: { id: p.id }, title: 'Actualizar', disabled: !!e.loading, cls: e.loading ? '[&_svg]:animate-spin' : '' }) + '</div>';
+  // La zona para soltar archivos es todo el panel; vacía, la invitación es la propia zona
+  const over = 'group-data-[over]/drop:border-indigo-400 group-data-[over]/drop:bg-indigo-50/60 dark:group-data-[over]/drop:border-indigo-400/60 dark:group-data-[over]/drop:bg-indigo-500/10';
+  const list = files.length
+    ? '<ul class="-mx-2 rounded-xl border-2 border-dashed border-transparent p-0.5 transition-colors ' + over + '">' + files.map(fgDriveFileRow).join('') + '</ul>'
+    : '<div class="rounded-xl border-2 border-dashed border-zinc-200 px-4 py-10 text-center transition-colors dark:border-zinc-700 ' + over + '">' +
+      icon('cloud-upload', 'mx-auto size-6 text-zinc-400 dark:text-zinc-500') +
+      '<p class="mt-2 text-sm text-zinc-500 dark:text-zinc-400"><span class="hidden pointer-fine:inline">Arrastra archivos aquí</span><span class="pointer-fine:hidden">Aún no hay archivos</span></p>' +
+      '<p class="mt-0.5 text-xs text-zinc-400 dark:text-zinc-500">Hasta 20 MB por archivo</p></div>';
+  return bar + fgDriveUploadsHtml(p.id, e, url) + list;
+}
+// Cola de subida de la pestaña: uno a la vez, con su fila de avance; al terminar, toast y lista fresca
+function fgDriveUpload(pid, list) {
+  const files = Array.prototype.slice.call(list || []);
+  if (!pid || !files.length) return Promise.resolve();
+  const e = fgDriveEntry(pid);
+  e.uploads = (e.uploads || []).filter(u => u.status !== 'error'); // una tanda nueva limpia los errores anteriores
+  files.forEach(f => {
+    const u = { uid: ++FG_STATE.upSeq, name: String((f && f.name) || 'archivo'), size: Number(f && f.size) || 0, status: 'queued', error: '' };
+    if (fgDriveTooBig(f)) { u.status = 'error'; u.big = true; u.error = fgDriveBigMsg(f, true); } else u.file = f;
+    e.uploads.push(u);
+  });
+  fgDrivePaint(pid);
+  return fgDriveWork(pid);
+}
+function fgDriveWork(pid) {
+  const e = fgDriveEntry(pid);
+  if (e.working) return e.working;
+  const step = () => {
+    const u = (e.uploads || []).find(x => x.status === 'queued');
+    if (!u) {
+      e.working = null;
+      const n = e.okBatch || 0;
+      e.okBatch = 0;
+      fgDrivePaint(pid);
+      if (!n) return null;
+      toast(n === 1 ? 'Subido a Drive' : n + ' archivos subidos a Drive', 'success');
+      return fgDriveLoad(pid);
+    }
+    u.status = 'uploading';
+    fgDrivePaint(pid);
+    return fgDriveSend(pid, u.file).then(r => {
+      e.uploads = e.uploads.filter(x => x !== u);
+      e.okBatch = (e.okBatch || 0) + 1;
+      fgDriveAdded(pid, r);
+    }, err => { u.status = 'error'; u.error = errMsg(err); }).then(() => { delete u.file; return step(); });
+  };
+  e.working = Promise.resolve().then(step);
+  return e.working;
+}
+// Selector de archivos único fuera del drawer: sobrevive a los redibujos mientras el diálogo del sistema está abierto
+function fgPickFiles(cb) {
+  let inp = document.getElementById('fg-file-pick');
+  if (!inp) {
+    inp = document.createElement('input');
+    inp.type = 'file';
+    inp.id = 'fg-file-pick';
+    inp.multiple = true;
+    inp.tabIndex = -1;
+    inp.className = 'sr-only';
+    inp.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(inp);
+  }
+  inp.value = '';
+  inp.onchange = () => {
+    const fs = Array.prototype.slice.call(inp.files || []);
+    inp.onchange = null;
+    inp.value = '';
+    if (fs.length) cb(fs);
+  };
+  inp.click();
+}
+// Arrastrar y soltar archivos sobre la pestaña Drive (se instala una vez, delegado en document)
+function fgDriveInstallDrop() {
+  if (FG_STATE.dropOn || typeof document === 'undefined') return;
+  FG_STATE.dropOn = true;
+  const zone = ev => (ev.target && ev.target.closest ? ev.target.closest('[data-fg-drop]') : null);
+  const hasFiles = ev => { const t = ev.dataTransfer && ev.dataTransfer.types; return !!t && Array.prototype.indexOf.call(t, 'Files') >= 0; };
+  const clear = keep => document.querySelectorAll('[data-fg-drop][data-over]').forEach(x => { if (x !== keep) x.removeAttribute('data-over'); });
+  document.addEventListener('dragover', ev => {
+    if (!hasFiles(ev) || !document.querySelector('[data-fg-drop]')) return;
+    ev.preventDefault(); // sin esto el navegador abriría el archivo y dejaría la app
+    const z = zone(ev);
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = z ? 'copy' : 'none';
+    clear(z);
+    if (z) z.setAttribute('data-over', '');
+  });
+  document.addEventListener('dragleave', ev => {
+    const z = zone(ev);
+    if (z && !(ev.relatedTarget && z.contains(ev.relatedTarget))) z.removeAttribute('data-over');
+  });
+  document.addEventListener('drop', ev => {
+    if (!hasFiles(ev) || !document.querySelector('[data-fg-drop]')) return;
+    ev.preventDefault();
+    clear(null);
+    const z = zone(ev);
+    const pid = z ? z.dataset.fgDrop : '';
+    const e = fgDriveGet(pid);
+    if (e && e.status === 'ok') fgDriveUpload(pid, ev.dataTransfer.files);
+  });
+}
+
+/* =====================================================================
+   Alta rápida en el drawer de proyecto (SPEC §14.2): Enter → ¿para cuándo? (pickDate) → se crea al tiro.
+   Si el texto ya trae la fecha («… mañana», «… 15/10»), no pregunta. La fila aparece atenuada mientras se guarda.
+   ===================================================================== */
+function fgQuickText(v) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); }
+function fgQuickAdd(p, nombre, fecha, typed) {
+  const pid = p.id;
+  const inp = document.getElementById('fg-qa-' + pid);
+  if (inp && fgQuickText(inp.value) === typed) inp.value = '';
+  // §15: dentro de un proyecto la tarea es del equipo (privada: false explícito)
+  const payload = {
+    tipo: 'Tarea', pilar: fgPilarKey(p.pilar) || p.pilar, proyecto: pid, nombre: String(nombre).slice(0, 300), detalle: '', resp: myEmail() || p.resp || '',
+    fecha: fecha || '', cascade: fgProjCascade(p), evidencias: [], estado: 'Pendiente', avisar: true, privada: false,
+  };
+  const tmp = Object.assign({ id: 'tmp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), creadoPor: myEmail() }, payload);
+  FG_STATE.qa.push(tmp);
+  const key = 'project:' + pid;
+  if (currentDrawerKey() === key) refreshDrawer();
+  const again = document.getElementById('fg-qa-' + pid);
+  if (again) again.focus();
+  return mutate('gSave', [payload], { silent: true }).then(b => {
+    FG_STATE.qa = FG_STATE.qa.filter(x => x !== tmp);
+    if (currentDrawerKey() === key) refreshDrawer();
+    // Si falló, el texto vuelve al campo para reintentar (si no se escribió otra cosa)
+    if (!b) { const i = document.getElementById('fg-qa-' + pid); if (i && !i.value.trim()) i.value = typed; }
+    return b;
+  });
+}
+
+/* =====================================================================
+   Acciones
+   ===================================================================== */
+action('task.open', d => { if (d.id) openTask(d.id); });
+action('task.new', d => openTaskForm({ pilar: d.pilar || '', proyecto: d.proyecto || '', fecha: d.fecha || '', cascade: d.cascade || '', nombre: d.nombre || '' }));
+action('task.edit', d => openTaskForm({ id: d.id, focus: d.focus || '' }));
+action('task.complete', d => openCompleteTask(d.id));
+action('task.closing', d => openCompleteTask(d.id));
+// Check de las listas (SPEC §13.3): pendiente → completeTask (animación + guardado instantáneo);
+// lista → reopenTask (sin confirmar: es reversible). Único dueño de esta acción.
+action('task.toggle', (d, el) => {
+  const t = IDX.task.get(d.id);
+  // Una fila optimista (id temporal 'tmp-…' de la lista personal) aún no existe en el servidor
+  if (!t || /^tmp-/.test(String(t.id))) return;
+  // Un toque a la vez: la animación dura ~0,5 s y luego se guarda (v3.4: sólo se ignora el doble toque)
+  const now = Date.now(), last = FG_STATE.tapAt[t.id] || 0;
+  if (now - last < 700) return;
+  FG_STATE.tapAt[t.id] = now;
+  if (t.estado === 'Realizada') {
+    if (typeof reopenTask === 'function') reopenTask(t.id);
+    else mutate('taskReopen', [t.id], { success: 'Tarea reabierta' });
+  } else if (typeof completeTask === 'function') {
+    completeTask(t.id, el);
+  } else {
+    openCompleteTask(t.id);
+  }
+});
+action('task.reopen', d => {
+  const t = IDX.task.get(d.id);
+  if (!t || t.estado !== 'Realizada') return;
+  if (typeof reopenTask === 'function') reopenTask(t.id);
+  else mutate('taskReopen', [t.id], { success: 'Tarea reabierta' });
+});
+// Interruptores del drawer: Avisarme (alterna) y Compartida / Privada (data-value 0|1). Cambio al instante (v3.4: sin base).
+action('task.flag', (d, el) => {
+  const t = IDX.task.get(d.id);
+  if (!t || FG_STATE.busy[t.id]) return;
+  const key = d.key === 'privada' ? 'privada' : 'avisar';
+  if (key === 'privada' && !fgCanPrivacy(t)) { toast(fgPrivacyBlock(t), 'info'); return; }
+  const cur = key === 'privada' ? fgPrivada(t) : fgAvisar(t);
+  const val = d.value === '1' ? true : d.value === '0' ? false : !cur;
+  if (val === cur) return;
+  const payload = { tipo: 'Tarea', id: t.id };
+  payload[key] = val;
+  const msg = key === 'avisar' ? (val ? 'Aviso por correo activado' : 'Listo, sin aviso por correo') : (val ? 'Ahora es privada' : 'Ahora la ve todo el equipo');
+  FG_STATE.busy[t.id] = 1;
+  // El interruptor se mueve al tiro; el cambio se aplica un instante después (deja ver la animación)
+  const sw = el && el.querySelector ? el.querySelector('[data-fg-switch]') : null;
+  if (sw) sw.dataset.on = val ? 'true' : 'false';
+  if (el && el.getAttribute('role') === 'switch') el.setAttribute('aria-checked', String(val));
+  setTimeout(() => {
+    const p = typeof optimistic === 'function'
+      ? optimistic(() => { const x = IDX.task.get(t.id); if (x) x[key] = val; }, 'gSave', [payload], { success: msg, reapply: true })
+      : mutate('gSave', [payload], { success: msg });
+    Promise.resolve(p).then(() => { delete FG_STATE.busy[t.id]; }, () => { delete FG_STATE.busy[t.id]; });
+  }, sw ? 160 : 0);
+});
+action('task.links', (d, el) => {
+  const m = el.closest('[role="dialog"]');
+  const box = m ? m.querySelector('[data-fg-links]') : null;
+  if (!box) return;
+  box.hidden = !box.hidden;
+  el.setAttribute('aria-expanded', box.hidden ? 'false' : 'true');
+  if (!box.hidden) { const u = box.querySelector('[data-ev-u]'); if (u) u.focus(); }
+});
+action('task.delete', d => {
+  const t = IDX.task.get(d.id);
+  if (!t) return;
+  const nC = (IDX.commentsByRef.get(t.id) || []).length;
+  confirmDialog({
+    title: '¿Eliminar tarea?', danger: true, confirmLabel: 'Eliminar',
+    message: '«' + fgClip(t.nombre, 90) + '» se eliminará' + (nC ? ' junto con ' + plural(nC, 'comentario', 'comentarios') : '') + '. Esta acción no se puede deshacer.',
+  }).then(ok => {
+    if (!ok) return;
+    // v3.4 (SPEC §18): desaparece al tiro; el servidor confirma por detrás (si falla, vuelve con la recarga)
+    const wasOpen = currentDrawerKey() === 'task:' + t.id;
+    optimistic(() => {
+      S.tasks = (S.tasks || []).filter(x => x.id !== t.id);
+      S.comments = (S.comments || []).filter(c => c.ref !== t.id);
+    }, 'gDelete', [t.id], { reapply: true });
+    toast('Tarea eliminada', 'success');
+    if (wasOpen) fgAfterDelete();
+  });
+});
+
+/* ---------- Compositor (task.cmp.*) ---------- */
+action('task.cmp.pop', (d, el) => { const r = fgCmpRoot(el); if (r) fgCmpPop(r, d.pop || ''); });
+action('task.cmp.date', (d, el) => {
+  const r = fgCmpRoot(el);
+  if (!r) return;
+  fgCmpSet(r, { fecha: /^\d{4}-\d{2}-\d{2}$/.test(d.value || '') ? d.value : '' });
+  fgCmpPop(r, '');
+  fgCmpFocusChip(r, 'fecha');
+});
+// Fecha escrita o elegida en el calendario: se aplica sin cerrar el selector (al teclear el año llegan fechas parciales)
+action('task.cmp.datepick', (d, el) => {
+  const r = fgCmpRoot(el);
+  if (!r) return;
+  const v = String(el.value || '');
+  if (v && !(/^\d{4}-\d{2}-\d{2}$/.test(v) && Number(v.slice(0, 4)) >= 2000)) return;
+  fgCmpSet(r, { fecha: v });
+  r.querySelectorAll('[data-fg-pop] [data-action="task.cmp.date"][data-value]').forEach(b => {
+    if (b.dataset.value) b.setAttribute('aria-pressed', b.dataset.value === v ? 'true' : 'false');
+  });
+});
+// v3.6: sumar / quitar personas y elegir responsable sin cerrar el selector
+function fgCmpPpl(el, change, email) {
+  const r = fgCmpRoot(el);
+  if (!r) return;
+  const cur = fgCmpGet(r);
+  const st = change({ resp: cur.resp, asignados: cur.asignados.slice() });
+  const patch = { resp: st.resp, asignados: st.asignados.join(',') };
+  if (st.asignados.length) patch.privada = false;
+  fgCmpSet(r, patch);
+  const box = r.querySelector('[data-fg-pop]');
+  if (box && r.dataset.pop === 'resp') {
+    box.innerHTML = '<div>' + fgCmpPopResp(fgCmpGet(r)) + '</div>';
+    refreshIcons(box);
+    const again = box.querySelector('[data-action="task.cmp.ppl"][data-value="' + (window.CSS && CSS.escape ? CSS.escape(email) : email) + '"]');
+    if (again) again.focus({ preventScroll: true });
+  }
+}
+action('task.cmp.ppl', (d, el) => { fgCmpPpl(el, st => fgPplToggle(st, d.value || ''), d.value || ''); });
+action('task.cmp.owner', (d, el) => { fgCmpPpl(el, st => fgPplOwner(st, d.value || ''), d.value || ''); });
+action('task.people', d => { if (d.id) openPeoplePicker(d.id); });
+action('task.cmp.resp', (d, el) => {
+  const r = fgCmpRoot(el);
+  if (!r) return;
+  fgCmpSet(r, { resp: d.value || '' });
+  fgCmpPop(r, '');
+  fgCmpFocusChip(r, 'resp');
+});
+action('task.cmp.proj', (d, el) => {
+  const r = fgCmpRoot(el);
+  if (!r) return;
+  fgCmpPickProject(r, d.value || '');
+  fgCmpPop(r, '');
+  fgCmpFocusChip(r, 'proyecto');
+});
+action('task.cmp.projq', (d, el) => { const r = fgCmpRoot(el); if (r) fgCmpFilterProjects(r, el.value); });
+action('task.cmp.projfirst', (d, el) => {
+  const r = fgCmpRoot(el);
+  if (!r || !String(el.value || '').trim()) return;
+  const first = Array.prototype.slice.call(r.querySelectorAll('[data-fg-popt][data-group]')).find(o => !o.hidden);
+  if (first) first.click();
+});
+action('task.cmp.pilar', (d, el) => {
+  const r = fgCmpRoot(el);
+  if (!r) return;
+  const pk = fgPilarKey(d.value || '');
+  if (fgCmpGet(r).pilar === pk) return;
+  fgCmpSet(r, { pilar: pk });
+  fgCpkRepilar(r, 'cascade', pk);
+  fgCmpMoreSummary(r);
+  refreshIcons(r);
+});
+action('task.cmp.toggle', (d, el) => {
+  const r = fgCmpRoot(el);
+  if (!r || el.disabled) return;
+  const st = fgCmpGet(r);
+  // §15: una vez tocado, el interruptor manda (elegir / quitar proyecto ya no lo cambia)
+  if (d.key === 'privada') { if (st.canPriv) { r.dataset.privTouched = '1'; fgCmpSet(r, { privada: !st.privada }); } return; }
+  fgCmpSet(r, { avisar: !st.avisar });
+});
+action('task.cmp.note', (d, el) => {
+  const r = fgCmpRoot(el);
+  const ta = r ? r.querySelector('[data-fg-note]') : null;
+  if (!ta) return;
+  ta.hidden = false;
+  el.hidden = true;
+  fgAutoGrow(ta);
+  ta.focus();
+});
+action('task.cmp.more', (d, el) => { const r = fgCmpRoot(el); if (r) fgCmpMore(r); });
+
+action('project.open', d => { if (d.id) openProject(d.id); });
+action('project.new', d => openProjectForm({ pilar: d.pilar || '' }));
+action('project.edit', d => openProjectForm({ id: d.id }));
+action('project.link', d => fgOpenLinkLines(d.id));
+action('project.back', () => {
+  while (FG_STATE.stack.length) { if (fgOpenEntry(FG_STATE.stack.pop())) return; }
+});
+action('project.tab', (d, el) => {
+  const v = FG_TABS.indexOf(d.value) >= 0 ? d.value : 'resumen';
+  if (d.id && currentDrawerKey() !== 'project:' + d.id) { openProject(d.id, { tab: v }); return; }
+  fgUi().projectTab = v;
+  FG_STATE.animTab = true;
+  refreshDrawer();
+  const body = document.querySelector('#drawer-root [data-drawer-body]');
+  if (body) body.scrollTop = 0;
+  if (el && el.getAttribute('role') === 'tab') {
+    const on = document.querySelector('#drawer-root [role="tab"][aria-selected="true"]');
+    if (on) on.focus({ preventScroll: true });
+  }
+});
+action('project.toggledone', () => { const ui = fgUi(); ui.showDone = !ui.showDone; refreshDrawer(); });
+action('project.quickadd', (d, el) => {
+  const p = IDX.project.get(d.id);
+  const text = fgQuickText(el.value);
+  if (!p || !text || el.dataset.busy || p.estado === 'Cerrado') return;
+  // «Llamar a Kilimo mañana» ya trae la fecha (parser de la lista personal): no se pregunta
+  const nat = typeof todoParse === 'function' ? todoParse(text, todayStr()) : null;
+  if (nat && nat.fecha && nat.nombre) { fgQuickAdd(p, nat.nombre, nat.fecha, text); return; }
+  if (typeof pickDate !== 'function') { fgQuickAdd(p, text, '', text); return; }
+  el.dataset.busy = '1';
+  pickDate(el, { title: '¿Para cuándo?' }).then(v => {
+    delete el.dataset.busy;
+    const inp = document.getElementById('fg-qa-' + p.id);
+    if (inp) delete inp.dataset.busy;
+    // Esc / clic fuera: el texto queda tal cual, sin crear nada
+    if (v === null) { if (inp) inp.focus(); return; }
+    const cur = IDX.project.get(p.id);
+    if (!cur || cur.estado === 'Cerrado') return;
+    fgQuickAdd(cur, text, v, text);
+  });
+});
+// Fecha de la tarea desde su drawer: «Cambiar» / «Poner fecha» → pickDate → guardado instantáneo
+action('task.redate', (d, el) => {
+  const t = IDX.task.get(d.id);
+  if (!t || t.estado === 'Realizada' || FG_STATE.busy[t.id]) return;
+  if (typeof pickDate !== 'function') { openTaskForm({ id: t.id, focus: 'fecha' }); return; }
+  pickDate(el, { title: t.fecha ? 'Nueva fecha' : '¿Para cuándo?' }).then(v => {
+    const cur = IDX.task.get(d.id);
+    if (v === null || !cur || v === (cur.fecha || '') || FG_STATE.busy[cur.id]) return;
+    FG_STATE.busy[cur.id] = 1;
+    const p = optimistic(() => { const x = IDX.task.get(cur.id); if (x) x.fecha = v; }, 'gSave', [{ tipo: 'Tarea', id: cur.id, fecha: v }], { reapply: true });
+    Promise.resolve(p).then(() => { delete FG_STATE.busy[cur.id]; }, () => { delete FG_STATE.busy[cur.id]; });
+  });
+});
+action('project.reopen', (d, el) => {
+  const p = IDX.project.get(d.id);
+  if (!p || p.estado !== 'Cerrado') return;
+  const pay = fgProjectPayload(p, { estado: 'Activo' });
+  optimistic(() => { const x = IDX.project.get(p.id); if (x) x.estado = 'Activo'; }, 'gSave', [pay], { reapply: true });
+  toast('Proyecto reabierto', 'success');
+});
+action('project.delete', d => {
+  const p = IDX.project.get(d.id);
+  if (!p) return;
+  const n = (IDX.tasksByProject.get(p.id) || []).length;
+  confirmDialog({
+    title: '¿Eliminar proyecto?', danger: true, confirmLabel: 'Eliminar',
+    message: '«' + fgClip(p.nombre, 90) + '» se eliminará junto con sus comentarios.' +
+      (n ? (n === 1 ? ' Su tarea quedará sin proyecto.' : ' Sus ' + n + ' tareas quedarán sin proyecto.') : '') +
+      ' Las líneas de presupuesto no se modifican.',
+  }).then(ok => {
+    if (!ok) return;
+    const key = 'project:' + p.id;
+    mutate('gDelete', [p.id], { success: 'Proyecto eliminado' }).then(b => {
+      if (!b) return;
+      if (currentDrawerKey() === key) closeDrawer();
+      else if (!currentDrawerKey()) fgAfterDelete();
+    });
+  });
+});
+action('project.unlink', d => {
+  const p = IDX.project.get(d.id);
+  if (!p) return;
+  const l = IDX.line.get(d.line);
+  confirmDialog({
+    title: '¿Desvincular línea?', confirmLabel: 'Desvincular',
+    message: (l ? '«' + fgClip(l.proj, 80) + '» (' + l.year + ')' : 'La línea') + ' dejará de sumar al presupuesto de este proyecto. La línea no se elimina del Cuadre.',
+  }).then(ok => {
+    if (!ok) return;
+    const cur = IDX.project.get(d.id);
+    if (!cur) return;
+    const pay = fgProjectPayload(cur, { lineas: (cur.lineas || []).filter(x => x !== d.line) });
+    optimistic(() => { const x = IDX.project.get(cur.id); if (x) x.lineas = pay.lineas.slice(); }, 'gSave', [pay], { reapply: true });
+    toast('Línea desvinculada', 'success');
+  });
+});
+action('project.openline', d => {
+  if (!d.line) return;
+  if (typeof openLine === 'function') { openLine(d.line); return; }
+  closeDrawer();
+  go('#/presupuesto/lineas');
+});
+action('project.linksearch', (d, el) => {
+  const root = el.closest('[role="dialog"]');
+  if (!root) return;
+  const terms = normTxt(el.value).split(/\s+/).filter(Boolean);
+  let shown = 0;
+  root.querySelectorAll('[data-link-group]').forEach(g => {
+    let n = 0;
+    g.querySelectorAll('[data-link-row]').forEach(r => {
+      const ok = terms.every(t => (r.dataset.q || '').indexOf(t) >= 0);
+      r.hidden = !ok;
+      if (ok) n++;
+    });
+    g.hidden = !n;
+    shown += n;
+  });
+  const e = root.querySelector('[data-link-empty]');
+  if (e) e.hidden = shown > 0;
+});
+action('project.formpilar', (d, el) => {
+  const root = el.closest('[role="dialog"]');
+  if (!root) return;
+  fgCpkRepilar(root, 'cascade', el.value);
+  refreshIcons(root);
+});
+
+/* ---------- Pestaña Drive (project.drive.*) ---------- */
+action('project.drive.refresh', d => { if (!d.id) return; fgDriveLoad(d.id); fgDrivePaint(d.id); });
+action('project.drive.choose', d => {
+  const e = fgDriveGet(d.id);
+  if (!e || e.status !== 'ok') return;
+  fgPickFiles(fs => fgDriveUpload(d.id, fs));
+});
+action('project.drive.dismiss', d => {
+  const e = fgDriveGet(d.id);
+  if (!e) return;
+  e.uploads = (e.uploads || []).filter(u => String(u.uid) !== String(d.uid));
+  fgDrivePaint(d.id);
+});
+action('project.drive.folder', d => {
+  const e = fgDriveGet(d.id);
+  if (!e || e.creating) return;
+  e.creating = true;
+  fgDrivePaint(d.id);
+  run('driveFolder', d.id).then(f => {
+    e.creating = false;
+    e.data = e.data || { folder: null, files: [] };
+    if (f && f.url) e.data.folder = { id: f.id, url: f.url, name: f.name };
+    fgDrivePaint(d.id);
+    toast('Carpeta creada en Drive', 'success');
+  }, err => {
+    e.creating = false;
+    const m = errMsg(err);
+    if (fgDriveIsOff(m)) { e.status = 'off'; FG_STATE.driveOff = true; }
+    fgDrivePaint(d.id);
+    toast(m, 'error');
+  });
+});
+action('project.drive.setup', () => { closeDrawer(); go('#/ajustes'); });
+
+action('cascade.picker.toggle', (d, el) => {
+  const root = fgCpkRoot(el);
+  if (!root) return;
+  const panel = root.querySelector('[data-cpk-panel]');
+  fgCpkSetOpen(root, !!(panel && panel.hidden));
+});
+action('cascade.picker.pick', (d, el) => {
+  const root = fgCpkRoot(el);
+  if (!root) return;
+  fgCpkSet(root, d.value || '');
+  fgCpkSetOpen(root, false);
+  const tr = root.querySelector('[data-cpk-trigger]');
+  if (tr) tr.focus();
+});
+action('cascade.picker.search', (d, el) => { const root = fgCpkRoot(el); if (root) fgCpkFilter(root, el.value); });
+action('cascade.picker.all', (d, el) => {
+  const root = fgCpkRoot(el);
+  if (!root) return;
+  root.dataset.all = el.checked ? '1' : '0';
+  const inp = root.querySelector('[data-cpk-value]');
+  const list = root.querySelector('[data-cpk-list]');
+  list.innerHTML = fgCpkListHtml(root.dataset.pilar, inp ? inp.value : '', el.checked);
+  refreshIcons(list);
+  const s = root.querySelector('[data-cpk-search]');
+  if (s && s.value) fgCpkFilter(root, s.value);
+});
+// Catálogo Cascade en el pilar del selector; con un indicador elegido, en su grupo y con su panel abierto
+// (mismo estado de VAdmin que usa asstOpenCascade).
+function fgOpenCatalog(pk, casId) {
+  const c = casId && IDX.cascade ? IDX.cascade.get(casId) : null;
+  if ((c || pk) && typeof admState === 'function') {
+    const A = admState();
+    A.pilar = c ? c.pilar : pk;
+    A.casQ = '';
+    if (c) A.open[c.padre || c.id] = true;
+  }
+  go('#/cascade');
+  if (c && c.padre && typeof openCascadeItem === 'function') openCascadeItem(c.id);
+}
+action('cascade.picker.manage', (d, el) => {
+  // Se lee antes de cerrar el formulario (el selector sale del DOM)
+  const root = fgCpkRoot(el);
+  const pk = root ? root.dataset.pilar || '' : '';
+  const inp = root ? root.querySelector('[data-cpk-value]') : null;
+  const casId = inp ? inp.value : '';
+  const leave = () => {
+    for (let i = 0; i < 10 && MODALS.length; i++) closeTopModal();
+    closeDrawer();
+    fgOpenCatalog(pk, casId);
+  };
+  if (!el.closest('[data-modal-body]')) { leave(); return; }
+  confirmDialog({ title: '¿Ir a Indicadores Cascade?', message: 'Se cerrará este formulario sin guardar los cambios.', confirmLabel: 'Ir a Cascade' })
+    .then(ok => { if (ok) leave(); });
+});
+
+action('evidence.add', (d, el) => {
+  const ed = el.closest('[data-ev-editor]');
+  const rows = ed ? ed.querySelector('[data-ev-rows]') : null;
+  if (!rows) return;
+  rows.insertAdjacentHTML('beforeend', fgEvRow({}));
+  const row = rows.lastElementChild;
+  refreshIcons(row);
+  const u = row.querySelector('[data-ev-u]');
+  if (u) u.focus();
+});
+// «Subir archivo» del editor de links: a la carpeta del proyecto; cada archivo queda como link
+action('evidence.upload', (d, el) => {
+  const ed = el.closest('[data-ev-editor]');
+  const pid = fgEvProject(ed);
+  if (!ed || !pid) return;
+  fgPickFiles(fs => { if (ed.isConnected) fgEvUpload(ed, pid, fs); });
+});
+action('evidence.remove', (d, el) => {
+  const row = el.closest('[data-ev-row]');
+  if (!row) return;
+  const ed = row.closest('[data-ev-editor]');
+  row.remove();
+  const add = ed ? ed.querySelector('[data-action="evidence.add"]') : null;
+  if (add) add.focus();
+});
+action('evidence.title', (d, el) => { delete el.dataset.auto; });
+action('evidence.url', (d, el) => {
+  const row = el.closest('[data-ev-row]');
+  if (!row) return;
+  const u = safeUrl(fgFixUrl(el.value));
+  fgEvSetIcon(row, u);
+  if (u || !el.value.trim()) fgEvSetErr(el, false);
+  const t = row.querySelector('[data-ev-t]');
+  if (t && u && (!t.value.trim() || t.dataset.auto === '1')) { t.value = fgEvAutoTitle(u); t.dataset.auto = '1'; }
+});
+action('evidence.check', (d, el) => {
+  const fixed = fgFixUrl(el.value);
+  if (fixed !== el.value.trim()) el.value = fixed;
+  fgEvSetErr(el, !!fixed && !safeUrl(fixed), 'Pega un link válido que empiece con https://');
+  const row = el.closest('[data-ev-row]');
+  if (!row) return;
+  const u = safeUrl(fixed);
+  fgEvSetIcon(row, u);
+  const t = row.querySelector('[data-ev-t]');
+  if (t && u && (!t.value.trim() || t.dataset.auto === '1')) { t.value = fgEvAutoTitle(u); t.dataset.auto = '1'; }
+});
+</script>

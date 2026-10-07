@@ -1,0 +1,1435 @@
+<script>
+/* =====================================================================
+   TodoPanel · «Mis tareas»: la lista personal de cada persona (SPEC §13.3 y §14)
+   - todoLayout(mainHtml): en pantallas xl agrega el panel a la derecha (o un riel si está colapsado);
+     en pantallas menores, una píldora flotante abre la misma lista como hoja lateral.
+   - todoMount(root): termina de montar (scroll del panel, píldora, arrastre en curso).
+   - todoOpenSheet(): abre la lista (hoja lateral en el celular; el panel derecho en pantallas anchas).
+     '#/tareas' ya no es una página: Core redirige al pilar y llama a todoOpenSheet.
+   Lista personal = myTasks() (Core). Todo es optimista: se ve al instante y el servidor confirma después.
+   Alta rápida: sin fecha escrita, Enter abre pickDate (Core) para elegirla.
+   Reordenar NO redibuja: las filas se mueven en el DOM, el orden queda en S.tasks y, tras una pausa,
+   se envía UNA llamada con el orden final. Mientras tanto ningún bundle que llegue cambia el orden.
+   Completar / reabrir lo hace la acción 'task.toggle' (FGestion) del checkButton de Core.
+   v3.2 (SPEC §15) privacidad: el alta rápida crea tareas privadas (públicas si el servidor no sabe quién soy);
+   el candado de una fila privada la comparte con un clic; «Mover a proyecto» la deja pública.
+   Modo selección (botón del encabezado): casillas en las filas (clic, Shift+clic = rango, «Todas»), barra inferior
+   «Hacer públicas / Hacer privadas» → UNA llamada tasksSetPrivacy. Mientras se selecciona no se arrastra ni se
+   reordena; Esc sale. Un bundle que llegue con la privacidad antigua no la revierte mientras la llamada vuela.
+   ===================================================================== */
+
+const TODO_WIDE_MQ = '(min-width: 80rem)';               // breakpoint xl de Tailwind
+const TODO_DONE_STEP = 10;
+const TODO_REORDER_MS = 700;                             // pausa antes de guardar el orden (varios movimientos = 1 llamada)
+const TODO_ORDER_KEEP = 30000;                           // tras guardar, protege el orden de respuestas leídas antes
+const TODO_EASE = 'transform .18s cubic-bezier(.2,.8,.2,1)';
+const TODO_DIAS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+const TODO_WEEKDAYS = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+// Palabras que quedan colgando antes de una fecha: «para el viernes», «antes del 15/10», «la próxima semana»
+const TODO_CONN = ['para', 'el', 'este', 'esta', 'hasta', 'antes', 'del', 'de', 'al', 'a', 'la', 'proximo', 'proxima'];
+// Elementos con transiciones que dependen del foco/hover: nacen sin transición y se activan en el cuadro siguiente,
+// después de que Core devuelve el foco (si no, cada redibujo repetiría el fundido del foco).
+const TODO_NT = ' data-todo-nt style="transition:none"';
+const TODO_STATE = {
+  installed: false,
+  seen: {},        // modo → Set('p:id' | 'd:id') ya dibujadas (sólo las nuevas se animan)
+  primed: {},      // modo → ya se dibujó una vez
+  doneCount: {}, doneAnim: {}, emptyWas: {}, bar: {}, scroll: {},
+  temps: [],       // altas rápidas aún sin confirmar: {task, known:Set, at, realId}
+  draft: '', ignore: '', doneLimit: TODO_DONE_STEP,
+  toggled: false, reveal: '', flash: '', drag: null, picking: false,
+  hold: null,      // v3.6: toque largo en curso (táctil) antes de arrastrar: {id, mode, x, y, timer}
+  noClickUntil: 0, // v3.6: tras arrastrar, el clic que sigue no abre la tarea
+  order: null,     // orden local aún no confirmado: {ids, gen, sent, done, seen}
+  orderGen: 0, reorderTimer: 0,
+  select: null,    // modo selección: {ids:Set, anchor:id} (null = apagado)
+  selAnim: false,  // la barra de selección entra animada en el próximo dibujo
+  priv: {},        // privacidad pedida y aún en vuelo: id → bool (un bundle antiguo no la revierte)
+  privFlying: 0, privSeq: 0, privForced: false, privDirty: false,
+};
+
+/* ---------- Utilidades puras ---------- */
+function todoIsTmp(id) { return /^tmp-/.test(String(id == null ? '' : id)); }
+function todoNorm(s) {
+  return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim()
+    .replace(/^[¿¡("'«]+|[.,;:!?)"'»]+$/g, '');
+}
+function todoSameName(a, b) {
+  const f = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  return f(a) === f(b);
+}
+function todoSameOrder(a, b) { return a.length === b.length && a.every((x, i) => x === b[i]); }
+// Nuevo orden al mover `id` a la posición `to` (índice dentro de la lista sin ese elemento).
+function todoMoveIds(ids, id, to) {
+  const rest = ids.filter(x => x !== id);
+  if (rest.length === ids.length) return ids.slice();
+  rest.splice(Math.max(0, Math.min(rest.length, to)), 0, id);
+  return rest;
+}
+// Fecha dd/mm(/aa) → 'yyyy-mm-dd'. Sin año: este año, o el próximo si ya pasó.
+function todoDateFrom(d, mo, y, base) {
+  if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return '';
+  const year = y ? (String(y).length === 2 ? 2000 + Number(y) : Number(y)) : base.getFullYear();
+  if (year < 2000 || year > 2100) return '';
+  const mk = yy => { const x = new Date(yy, mo - 1, d); return x.getMonth() === mo - 1 ? x : null; };
+  let x = mk(year);
+  if (!x) return '';
+  if (!y && x < new Date(base.getFullYear(), base.getMonth(), base.getDate())) x = mk(year + 1);
+  return x ? ymd(x) : '';
+}
+// Lenguaje natural liviano al final del texto: «hoy», «mañana», «pasado mañana», «viernes», «15/10»,
+// «en 3 días», «próxima semana». Devuelve {nombre, fecha, token} (token = palabras quitadas del nombre).
+function todoParse(text, today) {
+  const clean = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  const out = { nombre: clean, fecha: '', token: '' };
+  const words = clean ? clean.split(' ') : [];
+  if (words.length < 2) return out;
+  const n = words.map(todoNorm);
+  const base = parseYmd(today) || new Date();
+  const plus = k => ymd(new Date(base.getFullYear(), base.getMonth(), base.getDate() + k));
+  const L = n.length, last = n[L - 1], prev = n[L - 2];
+  let take = 0, fecha = '', m = null;
+  if (last === 'manana' && prev === 'pasado') { take = 2; fecha = plus(2); }
+  else if (last === 'hoy') { take = 1; fecha = plus(0); }
+  else if (last === 'manana') { take = 1; fecha = plus(1); }
+  else if (TODO_WEEKDAYS.indexOf(last) >= 0) {
+    take = 1; fecha = plus((TODO_WEEKDAYS.indexOf(last) - base.getDay() + 7) % 7 || 7);
+  } else if (last === 'semana' && (prev === 'proxima' || prev === 'siguiente')) {
+    take = 2; fecha = plus((8 - base.getDay()) % 7 || 7);       // el lunes que viene
+  } else if ((last === 'dias' || last === 'dia') && /^\d{1,3}$/.test(prev) && n[L - 3] === 'en') {
+    const k = Number(prev);
+    if (k >= 1 && k <= 365) { take = 3; fecha = plus(k); }
+  } else if ((m = last.match(/^(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2}|\d{4}))?$/))) {
+    fecha = todoDateFrom(Number(m[1]), Number(m[2]), m[3], base);
+    if (fecha) take = 1;
+  }
+  if (!take) return out;
+  let end = L - take;
+  while (end > 0 && TODO_CONN.indexOf(n[end - 1]) >= 0) end--;
+  if (end < 1) return out;                                       // nunca deja el nombre vacío
+  return { nombre: words.slice(0, end).join(' '), fecha: fecha, token: words.slice(end).join(' ') };
+}
+function todoParseInput(v) {
+  const p = todoParse(v, todayStr());
+  if (p.token && TODO_STATE.ignore && todoNorm(p.token) === TODO_STATE.ignore) {
+    return { nombre: String(v == null ? '' : v).replace(/\s+/g, ' ').trim(), fecha: '', token: '' };
+  }
+  return p;
+}
+function todoDueLabel(f) {
+  const d = daysUntil(f);
+  if (d === 0) return 'Hoy';
+  if (d === 1) return 'Mañana';
+  const x = parseYmd(f);
+  if (!x) return '';
+  return TODO_DIAS[x.getDay()] + ' ' + fmtDateShort(f) + (x.getFullYear() !== new Date().getFullYear() ? ' ' + x.getFullYear() : '');
+}
+
+/* ---------- Datos ---------- */
+function todoCmp(a, b) {
+  const oa = Number(a.orden) || 0, ob = Number(b.orden) || 0;
+  if (oa !== ob) return (oa || 1e9) - (ob || 1e9);
+  const fa = a.fecha || '9999', fb = b.fecha || '9999';
+  return fa < fb ? -1 : fa > fb ? 1 : 0;
+}
+function todoDoneCmp(a, b) {
+  const ka = (a.completada || '') + '|' + (a.actualizado || ''), kb = (b.completada || '') + '|' + (b.actualizado || '');
+  return ka < kb ? 1 : ka > kb ? -1 : 0;
+}
+function todoSeen(mode) { return TODO_STATE.seen[mode] || (TODO_STATE.seen[mode] = new Set()); }
+// La fila temporal pasa su estado (ya vista, por mostrar, por resaltar) a la tarea real.
+function todoAdopt(tmpId, realId) {
+  Object.keys(TODO_STATE.seen).forEach(k => TODO_STATE.seen[k].add('p:' + realId));
+  if (TODO_STATE.reveal === tmpId) TODO_STATE.reveal = realId;
+  if (TODO_STATE.flash === tmpId) TODO_STATE.flash = realId;
+}
+// Un alta rápida «aterriza» cuando llega del servidor una tarea nueva con el mismo nombre.
+function todoSettleTemps() {
+  if (!TODO_STATE.temps.length || !S) return;
+  const now = Date.now(), used = new Set(), tasks = S.tasks || [];
+  TODO_STATE.temps = TODO_STATE.temps.filter(x => {
+    if (now - x.at > 120000) return false;                     // red de seguridad: nunca quedan fantasmas
+    const real = x.realId ? tasks.find(t => t.id === x.realId)
+      : tasks.find(t => !used.has(t.id) && !todoIsTmp(t.id) && !x.known.has(t.id) && todoSameName(t.nombre, x.task.nombre) &&
+        (t.resp === x.task.resp || t.creadoPor === x.task.creadoPor));
+    if (!real) return true;
+    used.add(real.id);
+    todoAdopt(x.task.id, real.id);
+    return false;
+  });
+}
+// ¿El servidor sabe quién soy? Sin eso, una tarea privada no la vería nadie (§15: se crean públicas).
+function todoKnownMe() { return !!(S && S.me && S.me.email && S.me.email !== 'desconocido'); }
+// Mientras haya cambios de privacidad en vuelo, un bundle leído antes (o una respuesta que otra más nueva
+// dejó sin aplicar) no revierte lo pedido. Si hubo que corregir algo, al terminar se recargan los datos reales.
+function todoPrivSync() {
+  if (!S || !TODO_STATE.privFlying) return;
+  const pv = TODO_STATE.priv;
+  (S.tasks || []).forEach(t => {
+    if (!Object.prototype.hasOwnProperty.call(pv, t.id) || t.privada === pv[t.id]) return;
+    t.privada = pv[t.id];
+    TODO_STATE.privForced = true;
+    TODO_STATE.privDirty = true;                   // la vista ya se dibujó con lo antiguo: se redibuja una vez
+  });
+}
+function todoData() {
+  if (!S) return { pending: [], done: [] };
+  todoSettleTemps();
+  todoOrderSync();
+  todoPrivSync();
+  const base = typeof myTasks === 'function' ? myTasks() : [];
+  const have = new Set(base.map(t => t.id));
+  const all = base.concat(TODO_STATE.temps.map(x => x.task).filter(t => !have.has(t.id)));
+  return {
+    pending: all.filter(t => t.estado !== 'Realizada').sort(todoCmp),
+    done: all.filter(t => t.estado === 'Realizada').sort(todoDoneCmp),
+  };
+}
+function todoPendingIds() { return todoData().pending.map(t => t.id).filter(id => !todoIsTmp(id)); }
+function todoRoutePilar() {
+  const k = S && S.route && S.route.params ? S.route.params.pilar : '';
+  return k && (S.pillars || []).some(p => p.key === k) ? k : '';
+}
+function todoIsOpen() { return LS.get('todo.open', true) !== false; }
+function todoDoneOpen() { return LS.get('todo.doneOpen', false) === true; }
+function todoIsWide() { try { return !window.matchMedia || matchMedia(TODO_WIDE_MQ).matches; } catch (e) { return true; } }
+function todoPointerFine() { try { return !window.matchMedia || matchMedia('(pointer: fine)').matches; } catch (e) { return true; } }
+function todoIsDark() { return typeof document !== 'undefined' && document.documentElement.classList.contains('dark'); }
+function todoSel(id) { return window.CSS && CSS.escape ? CSS.escape(id) : String(id).replace(/["\\]/g, '\\$&'); }
+function todoFocus(el) { if (el && el.focus) { try { el.focus({ preventScroll: true }); } catch (e) {} } }
+
+/* ---------- Partes del panel ---------- */
+// Fila: check + título + fecha (+ candado). El proyecto/pilar va sólo en el tooltip del título.
+function todoDueHtml(t) {
+  if (!t.fecha || t.estado === 'Realizada') return '';
+  const di = dueInfo(t);
+  const cls = di.key === 'ok' ? 'text-zinc-400 dark:text-zinc-500' : 'rounded px-1.5 font-medium ' + tone(di.tone).soft;
+  return '<span class="mt-0.5 shrink-0 whitespace-nowrap text-[11px] leading-4 tabular-nums ' + cls + '" title="' + esc('Vence el ' + fmtDate(t.fecha)) + '">' + esc(di.label) + '</span>';
+}
+function todoContext(t) {
+  const p = t.proyecto && IDX.project ? IDX.project.get(t.proyecto) : null;
+  if (p) return 'Proyecto: ' + p.nombre;
+  const pl = t.pilar ? PIL(t.pilar) : null;
+  return pl ? pl.label : '';
+}
+function todoToolBtn(ic, act, title, id, taskId, mode, disabled) {
+  return '<button type="button" id="' + esc(id) + '" data-action="' + act + '" data-id="' + esc(taskId) + '" data-mode="' + esc(mode) + '" title="' + esc(title) + '" aria-label="' + esc(title) + '"' +
+    (disabled ? ' aria-disabled="true"' : '') +
+    ' class="grid size-7 place-items-center rounded-md text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 aria-disabled:opacity-30 aria-disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-white">' +
+    icon(ic, 'size-3.5') + '</button>';
+}
+function todoToolsHtml(t, mode) {
+  const uid = mode + '-' + t.id;
+  // Puntero fino: barra flotante al pasar el mouse o con foco. Táctil: menú ⋯. v3.6 (SPEC §20): sin asa ni flechas;
+  // la fila entera se arrastra (táctil: manteniéndola presionada). Alt+↑/↓ sigue ordenando con el teclado.
+  // En una privada la barra deja libre el candado (sigue a un clic de compartirse).
+  return '<div data-todo-tools' + TODO_NT + ' class="absolute ' + (t.privada === true ? 'right-8' : 'right-1.5') + ' top-1/2 z-[1] hidden -translate-y-1/2 items-center gap-0.5 rounded-lg border border-zinc-200 bg-white/95 p-0.5 opacity-0 shadow-sm backdrop-blur-sm transition-opacity duration-150 group-hover/todo:opacity-100 group-focus-within/todo:opacity-100 pointer-fine:flex dark:border-zinc-700 dark:bg-zinc-800/95">' +
+    todoToolBtn('user-round-plus', 'todo.people', 'Personas: cambiar responsable o sumar a alguien', 'todo-p-' + uid, t.id, mode) +
+    todoToolBtn('folder-input', 'todo.move', 'Mover a proyecto', 'todo-m-' + uid, t.id, mode) +
+    todoToolBtn('pencil', 'todo.edit', 'Editar', 'todo-e-' + uid, t.id, mode) + '</div>' +
+    '<div data-todo-tools class="-my-1.5 -mr-1 flex shrink-0 items-center pointer-fine:hidden">' +
+    '<button type="button" data-action="todo.menu" data-id="' + esc(t.id) + '" title="Más acciones" aria-label="Más acciones" class="grid size-9 place-items-center rounded-lg text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">' + icon('ellipsis', 'size-4') + '</button></div>';
+}
+// Con otras personas: sus avatares chicos (la tarea también está en sus listas)
+function todoPeopleHtml(t) {
+  const me = myEmail();
+  const others = (typeof taskPeople === 'function' ? taskPeople(t) : [t.resp]).filter(e => e && e !== me);
+  if (!others.length) return '';
+  return '<span class="mt-px shrink-0" title="' + esc('También: ' + others.map(userName).join(', ')) + '">' + avatarStack(others, 'xs', 2) + '</span>';
+}
+// Casilla del modo selección (state = true | false | 'mixed'). SVG en línea: cambia al instante, sin Lucide.
+function todoBoxHtml(state) {
+  const on = state === true || state === 'mixed';
+  const path = state === 'mixed' ? 'M4.5 8h7' : 'M3.5 8.4l2.9 2.9 6.1-6.6';
+  return '<span aria-hidden="true" class="grid size-5 shrink-0 place-items-center rounded-md border-2 transition-colors duration-150 ' +
+    (on ? 'border-indigo-600 bg-indigo-600 text-white dark:border-indigo-500 dark:bg-indigo-500'
+      : 'border-zinc-300 bg-white group-hover/todo:border-zinc-400 dark:border-zinc-600 dark:bg-zinc-900 dark:group-hover/todo:border-zinc-500') + '">' +
+    (on ? '<svg viewBox="0 0 16 16" class="size-3.5"><path d="' + path + '" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>' : '') + '</span>';
+}
+// Candado de una privada: un clic la comparte (en el modo selección, y mientras se guarda, es sólo un indicador).
+function todoLockHtml(t, active) {
+  if (t.privada !== true) return '';
+  if (!active) return '<span class="mt-0.5 shrink-0 text-zinc-400 dark:text-zinc-500" title="Privada">' + icon('lock', 'size-3.5') + '<span class="sr-only">Privada</span></span>';
+  const tip = 'Privada · clic para compartir';
+  return '<button type="button" data-action="todo.share" data-id="' + esc(t.id) + '" title="' + tip + '" aria-label="' + tip + '"' +
+    ' class="group/lock relative grid size-5 shrink-0 place-items-center rounded-md text-zinc-400 transition-colors before:absolute before:-inset-1.5 before:content-[\'\'] hover:bg-indigo-50 hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-500 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-300">' +
+    icon('lock', 'size-3.5 group-hover/lock:hidden') + icon('lock-open', 'hidden size-3.5 group-hover/lock:block') + '</button>';
+}
+// Fila de la lista. ctx = {mode, animate, seen, sel}; i/n = posición entre las pendientes reales (para ↑/↓).
+// ctx.sel (Set) = modo selección: casilla en vez del check, toda la fila marca/desmarca, sin herramientas ni arrastre.
+function todoRowHtml(t, ctx, i, n) {
+  const tmp = todoIsTmp(t.id);
+  const done = t.estado === 'Realizada';
+  const key = (done ? 'd:' : 'p:') + t.id;
+  const fresh = ctx.animate && !ctx.seen.has(key);
+  ctx.seen.add(key);
+  const picking = !!ctx.sel && !tmp && !done;
+  const on = picking && ctx.sel.has(t.id);
+  const titleCls = done ? 'text-zinc-400 line-through decoration-zinc-300 dark:text-zinc-500 dark:decoration-zinc-600' : 'text-zinc-800 dark:text-zinc-100';
+  const name = '<span class="line-clamp-2 break-words"><span class="task-title">' + esc(t.nombre || 'Tarea sin nombre') + '</span></span>';
+  const tip = todoContext(t);
+  const title = tmp || picking
+    ? '<span class="block min-w-0 flex-1 text-sm leading-5 ' + titleCls + '"' + (picking && tip ? ' title="' + esc(tip) + '"' : '') + '>' + name + '</span>'
+    : '<button type="button" id="' + esc('todo-t-' + ctx.mode + '-' + t.id) + '" data-todo-title data-action="todo.open" data-id="' + esc(t.id) + '"' + (tip ? ' title="' + esc(tip) + '"' : '') +
+      ' class="block min-w-0 flex-1 rounded text-left text-sm leading-5 transition-colors hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:hover:text-indigo-400 ' + titleCls + '">' + name + '</button>';
+  let check;
+  if (tmp) check = '<span class="size-5 shrink-0 rounded-full border-2 border-dashed border-zinc-300 dark:border-zinc-600" title="Guardando…" aria-hidden="true"></span>';
+  else if (picking) {
+    check = '<button type="button" role="checkbox" aria-checked="' + on + '" id="' + esc('todo-c-' + ctx.mode + '-' + t.id) + '" data-todo-title data-action="todo.pick" data-id="' + esc(t.id) + '"' +
+      ' aria-label="' + esc('Seleccionar: ' + (t.nombre || 'Tarea sin nombre')) + '" class="relative grid shrink-0 place-items-center rounded-md before:absolute before:-inset-2.5 before:content-[\'\'] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60">' +
+      todoBoxHtml(on) + '</button>';
+  } else check = checkButton(t);
+  const lock = todoLockHtml(t, !tmp && !ctx.sel);
+  const tools = !tmp && !done && !ctx.sel ? todoToolsHtml(t, ctx.mode) : '';
+  const bg = on ? ' bg-indigo-50/80 hover:bg-indigo-100/60 dark:bg-indigo-500/10 dark:hover:bg-indigo-500/15'
+    : ' hover:bg-zinc-100/70 focus-within:bg-zinc-100/70 dark:hover:bg-zinc-800/50 dark:focus-within:bg-zinc-800/50';
+  return '<div role="listitem" data-task-row data-todo-row="' + esc(t.id) + '"' + (picking ? ' data-action="todo.pick" data-id="' + esc(t.id) + '"' : '') + TODO_NT +
+    ' class="group/todo relative flex items-start gap-3 rounded-lg px-2 py-2 transition-colors duration-300' + (picking ? ' cursor-pointer select-none' : '') + bg + (fresh ? ' anim-slide-up' : '') + '">' +
+    check + '<div class="flex min-w-0 flex-1 items-start gap-2">' + title + todoDueHtml(t) + todoPeopleHtml(t) + lock + '</div>' + tools + '</div>';
+}
+// Barra fina de avance del día (sin texto): sólo si algo vence hoy o se completó hoy.
+function todoProgressHtml(L, mode) {
+  const today = todayStr();
+  const doneToday = L.done.filter(t => t.completada === today).length;
+  const due = L.pending.filter(t => t.fecha && t.fecha <= today).length;
+  const total = doneToday + due;
+  if (!total) return '';
+  const to = pct(doneToday, total);
+  const from = TODO_STATE.bar[mode] == null ? 0 : TODO_STATE.bar[mode];
+  TODO_STATE.bar[mode] = to;
+  return '<div class="h-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + to + '" aria-label="Avance de hoy" title="' + esc(doneToday + ' de ' + total + ' para hoy') + '">' +
+    '<div data-todo-bar="' + to + '" class="h-full rounded-full bg-emerald-500 transition-[width] duration-700 ease-out dark:bg-emerald-400" style="width:' + from + '%"></div></div>';
+}
+function todoChipHtml(p, anim) {
+  if (!p || !p.fecha) return '';
+  return '<span class="inline-flex items-center gap-1 rounded-lg bg-indigo-50 py-0.5 pl-1.5 pr-0.5 text-[11px] font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/15 dark:bg-indigo-500/15 dark:text-indigo-300 dark:ring-indigo-400/20' + (anim ? ' anim-scale-in' : '') + '" title="' + esc('Fecha: ' + fmtDate(p.fecha)) + '">' +
+    icon('calendar', 'size-3') + esc(todoDueLabel(p.fecha)) +
+    '<button type="button" data-action="todo.ignoreDate" data-todo-keepfocus title="No usar como fecha" aria-label="' + esc('No usar «' + p.token + '» como fecha') + '" class="grid size-4 place-items-center rounded text-indigo-500 transition hover:bg-indigo-100 hover:text-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-500/25 dark:hover:text-white">' + icon('x', 'size-3') + '</button></span>';
+}
+function todoAddHtml(mode) {
+  const id = 'todo-add-' + mode;
+  const p = todoParseInput(TODO_STATE.draft);
+  return '<div class="group/add relative">' +
+    '<label for="' + id + '" class="sr-only">Agregar una tarea</label>' +
+    '<span' + TODO_NT + ' class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-zinc-400 transition-colors group-focus-within/add:text-indigo-500 dark:text-zinc-500 dark:group-focus-within/add:text-indigo-400">' + icon('plus', 'size-4') + '</span>' +
+    '<input id="' + id + '" type="text"' + TODO_NT + ' data-todo-add="' + mode + '" data-enter="todo.add" data-input="todo.typing" value="' + esc(TODO_STATE.draft) + '" maxlength="300" autocomplete="off" enterkeyhint="done" placeholder="Agregar una tarea…" ' +
+    'class="block h-10 w-full rounded-xl border-0 bg-zinc-100/80 pl-9 ' + (p.fecha ? 'pr-28' : 'pr-3') + ' text-sm text-zinc-900 ring-1 ring-inset ring-transparent transition placeholder:text-zinc-400 hover:bg-zinc-100 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:bg-zinc-800/60 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:hover:bg-zinc-800 dark:focus:bg-zinc-900 dark:focus:ring-indigo-400">' +
+    '<span data-todo-chip data-key="' + esc(p.fecha ? p.fecha + '|' + p.token : '') + '" class="absolute inset-y-0 right-1.5 flex items-center">' + todoChipHtml(p, false) + '</span>' +
+    '</div>';
+}
+function todoEmptyHtml(mode, animate) {
+  const anim = animate && !TODO_STATE.emptyWas[mode];
+  return '<p class="flex items-center justify-center gap-1.5 px-3 py-10 text-sm text-zinc-400 dark:text-zinc-500' + (anim ? ' anim-fade-in' : '') + '">' +
+    icon('circle-check', 'size-4') + 'Sin pendientes</p>';
+}
+function todoDoneHtml(L, ctx) {
+  const mode = ctx.mode, n = L.done.length;
+  const prev = TODO_STATE.doneCount[mode];
+  TODO_STATE.doneCount[mode] = n;
+  if (!n) return '';
+  const open = todoDoneOpen();
+  const pop = ctx.animate && prev != null && n > prev;
+  let body = '';
+  if (open) {
+    const shown = L.done.slice(0, TODO_STATE.doneLimit);
+    const justOpened = !!TODO_STATE.doneAnim[mode];
+    TODO_STATE.doneAnim[mode] = false;
+    const rctx = { mode: mode, seen: ctx.seen, animate: ctx.animate && !justOpened };
+    body = '<div role="list" aria-label="Tareas realizadas" data-todo-done="' + mode + '" class="mt-0.5 space-y-px' + (justOpened ? ' anim-fade-in' : '') + '">' +
+      shown.map(t => todoRowHtml(t, rctx, 0, 0)).join('') + '</div>' +
+      (n > shown.length ? '<button type="button" id="todo-more-' + mode + '" data-action="todo.doneMore" class="ml-9 mt-1 rounded-md px-2 py-1 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">Ver más (' + (n - shown.length) + ')</button>' : '');
+  }
+  return '<div class="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800/80">' +
+    '<button type="button" id="todo-done-' + mode + '" data-action="todo.doneToggle" aria-expanded="' + open + '" class="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200">' +
+    icon('chevron-right', 'size-3.5 transition-transform' + (open ? ' rotate-90' : '')) + 'Realizadas' +
+    '<span class="inline-block tabular-nums text-zinc-400 dark:text-zinc-500' + (pop ? ' anim-pop' : '') + '">· ' + n + '</span></button>' + body + '</div>';
+}
+function todoNoIdentityHtml() {
+  return '<div class="px-6 py-10 text-center">' +
+    '<p class="text-sm text-zinc-500 dark:text-zinc-400">Elige tu nombre en Ajustes para ver tu lista.</p>' +
+    '<div class="mt-3">' + btn({ label: 'Ir a Ajustes', icon: 'settings', size: 'sm', href: '#/ajustes' }) + '</div></div>';
+}
+/* ---------- Modo selección: partes ---------- */
+// Botón discreto del encabezado (panel derecho y encabezado de la hoja en el celular).
+function todoSelBtnHtml(mode, on) {
+  const tip = on ? 'Terminar selección (Esc)' : 'Seleccionar';
+  return '<button type="button" id="todo-sel-' + mode + '" data-action="todo.select" aria-pressed="' + on + '" title="' + tip + '" aria-label="' + tip + '"' +
+    ' class="inline-grid size-8 shrink-0 place-items-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 ' +
+    (on ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300 dark:hover:bg-indigo-500/25'
+      : 'text-zinc-400 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-100') + '">' +
+    icon('list-checks', 'size-4') + '</button>';
+}
+// Ids seleccionables (pendientes reales, en el orden de la lista) y la selección depurada contra ellos.
+// Si ya no queda nada que seleccionar, el modo se apaga solo.
+function todoSelPrune(L) {
+  const sel = TODO_STATE.select;
+  if (!sel) return null;
+  const ids = L.pending.map(t => t.id).filter(id => !todoIsTmp(id));
+  if (!ids.length || !myEmail()) { TODO_STATE.select = null; return null; }
+  const keep = new Set(ids);
+  sel.ids.forEach(id => { if (!keep.has(id)) sel.ids.delete(id); });
+  if (sel.anchor && !keep.has(sel.anchor)) sel.anchor = '';
+  return ids;
+}
+// «Todas» en el lugar del alta rápida (alineada con las casillas de las filas).
+function todoSelAllHtml(mode, ids, anim) {
+  const n = ids.filter(id => TODO_STATE.select.ids.has(id)).length;
+  const state = n && n === ids.length ? true : n ? 'mixed' : false;
+  return '<button type="button" role="checkbox" aria-checked="' + state + '" id="todo-all-' + mode + '" data-todo-selall data-action="todo.selAll"' +
+    ' class="flex h-10 w-full items-center gap-3 rounded-lg ' + (mode === 'sheet' ? 'px-0' : 'px-1') + ' text-left text-sm font-medium text-zinc-600 transition-colors hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-300 dark:hover:text-white' + (anim ? ' anim-fade-in' : '') + '">' +
+    todoBoxHtml(state) + '<span>Todas</span></button>';
+}
+// Barra inferior: «N seleccionadas · Hacer públicas · Hacer privadas · Cancelar».
+function todoSelBarHtml(mode, L, anim) {
+  const chosen = L.pending.filter(t => TODO_STATE.select.ids.has(t.id));
+  const n = chosen.length, nPriv = chosen.filter(t => t.privada === true).length, nPub = n - nPriv;
+  const known = todoKnownMe();
+  const b = (val, ic, label, why, primary) => {
+    const dis = !!why;
+    const look = primary
+      ? 'bg-indigo-600 text-white shadow-sm dark:bg-indigo-500' + (dis ? '' : ' hover:bg-indigo-500 dark:hover:bg-indigo-400')
+      : 'bg-white text-zinc-800 shadow-sm ring-1 ring-inset ring-zinc-300 dark:bg-zinc-800 dark:text-zinc-100 dark:ring-zinc-700' + (dis ? '' : ' hover:bg-zinc-50 dark:hover:bg-zinc-700/80');
+    return '<button type="button" data-action="todo.selApply" data-value="' + val + '"' + (dis ? ' aria-disabled="true" title="' + esc(why) + '"' : '') +
+      ' class="inline-flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-lg px-3 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 ' +
+      (dis ? 'cursor-not-allowed opacity-40 ' : 'active:scale-[.98] ') + look + '">' + icon(ic, 'size-4 shrink-0') + '<span class="truncate">' + label + '</span></button>';
+  };
+  const pubWhy = !n ? 'Elige una o más tareas' : !nPriv ? 'Ya las ve el equipo' : '';
+  const privWhy = !n ? 'Elige una o más tareas' : !known ? 'No pude identificar tu cuenta de Google' : !nPub ? 'Ya son privadas' : '';
+  const wrap = mode === 'sheet'
+    // Pegada abajo de la hoja (-bottom-5 compensa el padding del cuerpo, como el -top-5 del alta rápida).
+    ? '<div data-todo-selbar class="sticky -bottom-5 z-10 mt-auto border-t border-zinc-200/80 bg-white/95 px-5 pt-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95' + (anim ? ' anim-slide-up' : '') + '" style="padding-bottom:max(.75rem, env(safe-area-inset-bottom))">'
+    : '<div data-todo-selbar class="shrink-0 border-t border-zinc-200/80 bg-white px-3 pb-3 pt-2.5 dark:border-zinc-800 dark:bg-zinc-900' + (anim ? ' anim-slide-up' : '') + '">';
+  return wrap + '<div class="flex items-center gap-2 pl-1">' +
+    '<span class="text-sm font-medium tabular-nums text-zinc-900 dark:text-white" aria-live="polite">' + plural(n, 'seleccionada', 'seleccionadas') + '</span>' +
+    '<span class="flex-1"></span>' +
+    '<button type="button" data-action="todo.selCancel" title="Cancelar (Esc)" class="rounded-md px-2 py-1 text-sm font-medium text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-white">Cancelar</button></div>' +
+    '<div class="mt-2 grid grid-cols-2 gap-2">' + b('0', 'users', 'Hacer públicas', pubWhy, true) + b('1', 'lock', 'Hacer privadas', privWhy, false) + '</div></div>';
+}
+
+// El panel completo (mode = 'aside' | 'sheet'). Siempre envuelto en [data-todo-panel].
+function todoPanelHtml(mode) {
+  todoInstall();
+  mode = mode === 'sheet' ? 'sheet' : 'aside';
+  if (!S) return '<div data-todo-panel="' + mode + '"></div>';
+  const me = myEmail();
+  const L = todoData();
+  const selIds = todoSelPrune(L);
+  const sel = selIds ? TODO_STATE.select : null;
+  const selAnim = !!sel && TODO_STATE.selAnim;
+  if (sel) TODO_STATE.selAnim = false;
+  const ctx = { mode: mode, animate: !!TODO_STATE.primed[mode], seen: todoSeen(mode), sel: sel ? sel.ids : null };
+  const realN = L.pending.filter(t => !todoIsTmp(t.id)).length;
+  let k = 0, list;
+  if (!me) list = todoNoIdentityHtml();
+  else if (!L.pending.length) list = todoEmptyHtml(mode, ctx.animate);
+  else {
+    list = '<div role="list" aria-label="Tareas pendientes" data-todo-list="' + mode + '" class="space-y-px">' +
+      L.pending.map(t => todoRowHtml(t, ctx, todoIsTmp(t.id) ? -1 : k++, realN)).join('') + '</div>';
+  }
+  TODO_STATE.emptyWas[mode] = !!me && !L.pending.length;
+  // Seleccionando: «Todas» reemplaza al alta rápida, las realizadas se esconden y aparece la barra de acciones.
+  const done = me && !sel ? todoDoneHtml(L, ctx) : '';
+  const add = !me ? '' : sel ? todoSelAllHtml(mode, selIds, selAnim) : todoAddHtml(mode);
+  const bar = sel ? todoSelBarHtml(mode, L, selAnim) : '';
+  TODO_STATE.primed[mode] = true;
+  if (mode === 'sheet') {
+    // En selección la hoja ocupa todo el alto: la barra queda abajo aunque la lista sea corta.
+    return '<div data-todo-panel="sheet" class="-mx-5 -mt-5' + (sel ? ' -mb-5 flex flex-col' : '') + '"' + (sel ? ' style="min-height:calc(100% + 2.5rem)"' : '') + '>' +
+      // -top-5: el cuerpo del panel tiene padding y el elemento «sticky» se pegaría 20 px más abajo.
+      (add ? '<div class="sticky -top-5 z-10 bg-white/95 px-5 pb-2 pt-4 backdrop-blur dark:bg-zinc-900/95">' + add + '</div>' : '') +
+      '<div class="px-3 pt-1' + (sel ? ' pb-4' : '') + '">' + list + done + '</div>' + bar + '</div>';
+  }
+  const n = L.pending.length;
+  const progress = me ? todoProgressHtml(L, mode) : '';
+  return '<div data-todo-panel="aside" class="flex min-h-0 flex-1 flex-col">' +
+    '<div class="flex items-center gap-1 pl-4 pr-2 pt-2.5">' +
+    '<h2 class="text-[15px] font-semibold tracking-tight text-zinc-900 dark:text-white">Mis tareas</h2>' +
+    (me && n ? '<span class="ml-1 text-xs font-medium tabular-nums text-zinc-400 dark:text-zinc-500">' + n + '<span class="sr-only"> pendientes</span></span>' : '') +
+    '<span class="flex-1"></span>' + (me && realN ? todoSelBtnHtml(mode, !!sel) : '') +
+    iconBtn({ icon: 'panel-right-close', action: 'todo.collapse', title: 'Ocultar mis tareas' }) + '</div>' +
+    (progress ? '<div class="px-4 pt-1">' + progress + '</div>' : '') +
+    (add ? '<div class="px-3 pb-2 pt-2">' + add + '</div>' : '') +
+    '<div data-todo-scroll="aside" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-4">' + list + done + '</div>' + bar + '</div>';
+}
+
+/* ---------- Layout con panel (lo usa VGestion) ---------- */
+function todoLayout(mainHtml) {
+  todoInstall();
+  if (!todoIsWide()) return '<div data-todo-layout="narrow">' + (mainHtml || '') + '</div>';
+  const anim = TODO_STATE.toggled ? ' anim-fade-in' : '';
+  TODO_STATE.toggled = false;
+  let side;
+  if (todoIsOpen()) {
+    side = '<aside aria-label="Mis tareas" class="sticky top-6 -mb-10 flex h-[calc(100dvh-6.5rem)] w-[340px] shrink-0 flex-col overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900' + anim + '">' +
+      todoPanelHtml('aside') + '</aside>';
+  } else {
+    const n = todoData().pending.length;
+    side = '<div class="sticky top-6 -mb-10 w-11 shrink-0' + anim + '">' +
+      '<button type="button" data-action="todo.expand" title="Mostrar mis tareas" aria-expanded="false" aria-label="' + esc('Mostrar mis tareas' + (n ? ' (' + plural(n, 'pendiente', 'pendientes') + ')' : '')) + '" class="flex w-11 flex-col items-center gap-3 rounded-2xl border border-zinc-200/80 bg-white py-3 text-zinc-500 shadow-sm transition hover:border-zinc-300 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-white">' +
+      icon('panel-right-open', 'size-4') +
+      '<span class="text-xs font-medium tracking-wide [writing-mode:vertical-rl]">Mis tareas</span>' +
+      (n ? '<span class="grid min-w-5 place-items-center rounded-full bg-zinc-100 px-1 text-[10px] font-semibold tabular-nums text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">' + n + '</span>' : '') +
+      '</button></div>';
+  }
+  return '<div data-todo-layout="wide" class="flex items-start gap-6"><div class="min-w-0 flex-1">' + (mainHtml || '') + '</div>' + side + '</div>';
+}
+function todoMount(root) {
+  todoInstall();
+  todoAfterRender(root);
+}
+// Después de cada dibujo: scroll del panel, barra de avance, fila nueva a la vista, resaltado, arrastre y píldora.
+function todoAfterRender() {
+  if (typeof document === 'undefined') return;
+  // Sin panel en pantalla (hoja cerrada, panel oculto, otra vista) la selección no sigue viva.
+  if (TODO_STATE.select && !document.querySelector('[data-todo-panel]')) TODO_STATE.select = null;
+  // El panel corrigió una privacidad en vuelo después de que la vista se dibujara: la vista se pone al día.
+  if (TODO_STATE.privDirty) { TODO_STATE.privDirty = false; if (S && S.route) rerender(); }
+  document.querySelectorAll('[data-todo-scroll]').forEach(sc => {
+    const v = TODO_STATE.scroll[sc.dataset.todoScroll];
+    if (sc.dataset.todoRestored) return;
+    sc.dataset.todoRestored = '1';
+    if (v) sc.scrollTop = v;
+  });
+  document.querySelectorAll('[data-todo-bar]').forEach(b => {
+    const to = b.dataset.todoBar + '%';
+    if (b.style.width === to) return;
+    void b.offsetWidth;
+    requestAnimationFrame(() => { b.style.width = to; });
+  });
+  if (TODO_STATE.reveal) {
+    const row = document.querySelector('[data-todo-list] [data-todo-row="' + todoSel(TODO_STATE.reveal) + '"]');
+    if (row) { TODO_STATE.reveal = ''; todoReveal(row); }
+  }
+  if (TODO_STATE.flash) { const id = TODO_STATE.flash; TODO_STATE.flash = ''; todoFlashRow(id); }
+  // Si la lista se redibujó a mitad de un arrastre, la fila nueva retoma el arrastre sin saltos.
+  const d = TODO_STATE.drag;
+  if (d && d.active && d.row && !d.row.isConnected && !todoDragRebind(d)) todoDragEnd(false);
+  if (document.querySelector('[data-todo-nt]')) {
+    requestAnimationFrame(() => {
+      const nt = document.querySelectorAll('[data-todo-nt]');
+      if (!nt.length) return;
+      void document.body.offsetWidth;            // aplica el foco ya restaurado sin transición
+      nt.forEach(x => { x.style.transition = ''; x.removeAttribute('data-todo-nt'); });
+    });
+  }
+  todoSyncFab();
+}
+// Resalta un momento la fila (estilo en línea: no depende de que Tailwind genere la clase a tiempo).
+function todoFlashRow(id) {
+  if (typeof document === 'undefined' || !id) return;
+  document.querySelectorAll('[data-todo-list] [data-todo-row="' + todoSel(id) + '"]').forEach(r => {
+    r.style.backgroundColor = todoIsDark() ? 'rgb(99 102 241 / .16)' : 'rgb(99 102 241 / .09)';
+    setTimeout(() => { r.style.backgroundColor = ''; }, 900);
+  });
+}
+function todoScrollParent(el) {
+  for (let n = el && el.parentElement; n && n !== document.body; n = n.parentElement) {
+    const s = getComputedStyle(n).overflowY;
+    if (s === 'auto' || s === 'scroll') return n;
+  }
+  return document.getElementById('view');
+}
+// Deja la fila a la vista dentro de su contenedor (sin mover el resto de la página).
+function todoReveal(row) {
+  const sc = todoScrollParent(row);
+  if (!sc) return;
+  const r = row.getBoundingClientRect(), s = sc.getBoundingClientRect();
+  if (r.bottom > s.bottom - 12) sc.scrollTop += r.bottom - s.bottom + 12;
+  else if (r.top < s.top + 12 && !row.closest('[data-todo-panel="sheet"]')) sc.scrollTop -= s.top + 12 - r.top;
+  if (sc.dataset.todoScroll) TODO_STATE.scroll[sc.dataset.todoScroll] = sc.scrollTop;
+}
+// Píldora flotante (pantallas < xl): vive en <body> para no depender de las animaciones de la vista.
+function todoSyncFab() {
+  if (typeof document === 'undefined') return;
+  const narrow = document.querySelector('#view [data-todo-layout="narrow"]');
+  let fab = document.getElementById('todo-fab');
+  if (!narrow || !S) { if (fab) fab.remove(); return; }
+  const n = todoData().pending.length;
+  const html = icon('list-todo', 'size-4') + '<span>Mis tareas</span>' +
+    (n ? '<span class="text-white/50 dark:text-zinc-900/40" aria-hidden="true">·</span><span class="tabular-nums">' + n + '</span>' : '');
+  if (!fab) {
+    fab = document.createElement('button');
+    fab.type = 'button';
+    fab.id = 'todo-fab';
+    fab.setAttribute('data-action', 'todo.sheet');
+    fab.className = 'fixed right-5 z-20 flex items-center gap-2 rounded-full bg-zinc-900 py-2.5 pl-3.5 pr-4 text-sm font-medium text-white shadow-lg shadow-zinc-900/25 ring-1 ring-black/5 transition hover:-translate-y-0.5 hover:bg-zinc-800 active:scale-[.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/60 anim-slide-up dark:bg-white dark:text-zinc-900 dark:shadow-black/40 dark:ring-white/10 dark:hover:bg-zinc-100';
+    fab.style.bottom = 'max(1.25rem, env(safe-area-inset-bottom))';
+    fab.addEventListener('animationend', () => fab.classList.remove('anim-slide-up'), { once: true });
+    document.body.appendChild(fab);
+  }
+  if (fab.dataset.html !== html) { fab.innerHTML = html; fab.dataset.html = html; refreshIcons(fab); }
+  fab.setAttribute('aria-label', 'Mis tareas' + (n ? ': ' + plural(n, 'pendiente', 'pendientes') : ''));
+}
+function todoSheetDef() {
+  if (!S) return null;
+  const body = todoPanelHtml('sheet');            // primero el cuerpo: depura la selección
+  return {
+    title: 'Mis tareas',
+    iconHtml: '<div class="grid size-9 shrink-0 place-items-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-black/5 dark:bg-indigo-500/15 dark:text-indigo-300 dark:ring-white/5">' + icon('list-todo', 'size-4') + '</div>',
+    body: body,
+    headerRight: myEmail() && todoPendingIds().length ? todoSelBtnHtml('sheet', !!TODO_STATE.select) : '',
+  };
+}
+// Abre «Mis tareas»: con el panel derecho en pantalla lo despliega; si no, la hoja lateral.
+function todoOpenSheet() {
+  if (typeof document === 'undefined' || !S) return;
+  if (todoIsWide() && document.querySelector('#view [data-todo-layout="wide"]')) {
+    if (!todoIsOpen()) { LS.set('todo.open', true); TODO_STATE.toggled = true; rerender(); }
+    if (todoPointerFine()) todoFocus(document.getElementById('todo-add-aside'));
+    return;
+  }
+  const first = currentDrawerKey() !== 'todo';
+  if (first) TODO_STATE.select = null;              // la hoja siempre abre en modo normal
+  openDrawer({ key: 'todo', width: 'md', render: todoSheetDef, onMount: () => todoAfterRender() });
+  // En pantallas táctiles no se abre el teclado solo.
+  if (first && todoPointerFine()) setTimeout(() => todoFocus(document.getElementById('todo-add-sheet')), 280);
+}
+// Redibuja sólo los paneles (cambios locales de la lista, sin tocar el resto de la vista).
+// skipSheet: la hoja ya se redibujó entera (refreshDrawer) y no hace falta repetirla.
+function todoRefresh(skipSheet) {
+  if (typeof document === 'undefined' || !S) return;
+  document.querySelectorAll('[data-todo-panel]').forEach(el => {
+    const mode = el.dataset.todoPanel;
+    if (skipSheet && mode === 'sheet') return;
+    const ae = document.activeElement;
+    const fid = ae && ae.id && el.contains(ae) ? ae.id : '';
+    const sc = el.querySelector('[data-todo-scroll]');
+    if (sc) TODO_STATE.scroll[sc.dataset.todoScroll] = sc.scrollTop;
+    const box = document.createElement('div');
+    box.innerHTML = todoPanelHtml(mode);
+    const fresh = box.firstElementChild;
+    if (!fresh) return;
+    el.replaceWith(fresh);
+    refreshIcons(fresh);
+    if (fid) todoFocus(document.getElementById(fid));
+  });
+  todoAfterRender();
+}
+function todoAnnounce(msg) {
+  if (typeof document === 'undefined') return;
+  let el = document.getElementById('todo-live');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'todo-live';
+    el.className = 'sr-only';
+    el.setAttribute('aria-live', 'polite');
+    document.body.appendChild(el);
+  }
+  el.textContent = '';
+  setTimeout(() => { el.textContent = msg; }, 40);
+}
+
+/* ---------- Alta rápida ---------- */
+function todoSyncChip(el, anim) {
+  const wrap = el && el.parentElement;
+  const box = wrap && wrap.querySelector('[data-todo-chip]');
+  if (!box) return;
+  const p = todoParseInput(el.value);
+  const key = p.fecha ? p.fecha + '|' + p.token : '';
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = todoChipHtml(p, anim);
+  el.classList.toggle('pr-28', !!p.fecha);
+  el.classList.toggle('pr-3', !p.fecha);
+  if (p.fecha) refreshIcons(box);
+}
+// Enter: con fecha escrita («mañana», «15/10»…) se crea al tiro; si no, pickDate (Core) pregunta para cuándo.
+// pickDate → null: se cancela y el texto queda; '' → sin fecha; 'yyyy-mm-dd' → con esa fecha.
+function todoAdd(el) {
+  if (!S || !el || TODO_STATE.picking) return;
+  const raw = String(el.value || '');
+  const p = todoParseInput(raw);
+  if (!p.nombre) { todoFocus(el); return; }
+  if (!myEmail()) { toast('Para usar tu lista, elige tu nombre en Ajustes.', 'info'); return; }
+  if (p.fecha || typeof pickDate !== 'function') { todoCreate(el, p.nombre, p.fecha || ''); return; }
+  const inputId = el.id;
+  TODO_STATE.picking = true;
+  let ask;
+  try { ask = Promise.resolve(pickDate(el, { title: '¿Para cuándo?' })); } catch (e) { ask = Promise.resolve(''); }
+  return ask.catch(() => '').then(f => {
+    TODO_STATE.picking = false;
+    // La vista pudo redibujarse mientras el menú estaba abierto: se usa el campo actual.
+    const inp = (inputId && typeof document !== 'undefined' && document.getElementById(inputId)) || el;
+    if (f == null) { todoFocus(inp); return; }
+    const now = todoParseInput(String(inp.value || ''));
+    todoCreate(inp, now.nombre || p.nombre, String(f));
+  });
+}
+function todoCreate(el, nombre, fecha) {
+  const me = myEmail();
+  if (!S || !me || !nombre) return;
+  const raw = String(el.value || '') || nombre;
+  const pilar = todoRoutePilar();
+  const tmpId = 'tmp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  // §15: la lista personal es privada por defecto (compartida si el servidor no sabe quién soy).
+  const privada = todoKnownMe();
+  const task = {
+    id: tmpId, pilar: pilar, proyecto: '', nombre: nombre, detalle: '', resp: me, fecha: fecha || '', estado: 'Pendiente',
+    cascade: '', evidencias: [], cierre: '', completada: '', avisar: true, privada: privada, orden: 0,
+    creadoPor: me, creado: new Date().toISOString(), actualizadoPor: me, actualizado: '',
+  };
+  const entry = { task: task, known: new Set((S.tasks || []).map(t => t.id)), at: Date.now(), realId: '' };
+  TODO_STATE.temps.push(entry);
+  TODO_STATE.draft = '';
+  TODO_STATE.ignore = '';
+  TODO_STATE.reveal = tmpId;
+  el.value = '';
+  todoSyncChip(el);
+  todoAnnounce('Agregada: ' + nombre);
+  const inputId = el.id;
+  const payload = { tipo: 'Tarea', nombre: nombre, resp: me, pilar: pilar, fecha: fecha || '', avisar: true, privada: privada, estado: 'Pendiente' };
+  const saving = optimistic(() => { S.tasks = (S.tasks || []).concat([task]); }, 'gSave', [payload]).then(b => {
+    const at = TODO_STATE.temps.indexOf(entry);
+    if (b && !b.stale && b.lastId) {
+      entry.realId = b.lastId;
+      // Si el nombre llegó distinto (el servidor lo normalizó), la temporal se retira aquí.
+      if (at >= 0) { TODO_STATE.temps.splice(at, 1); todoAdopt(tmpId, b.lastId); todoRefresh(); }
+      return;
+    }
+    if (b) return;                                   // guardado con recarga pendiente: aterriza solo
+    if (at >= 0) TODO_STATE.temps.splice(at, 1);
+    S.tasks = (S.tasks || []).filter(t => t.id !== tmpId);
+    rebuildIndex(); renderShell(); rerender(); refreshDrawer();
+    const inp = typeof document !== 'undefined' ? document.getElementById(inputId) : null;
+    if (inp && !inp.value) { inp.value = raw; TODO_STATE.draft = raw; todoSyncChip(inp); }
+  });
+  // Listo para la siguiente (el redibujo optimista reemplazó el campo).
+  todoFocus((inputId && typeof document !== 'undefined' && document.getElementById(inputId)) || el);
+  return saving;
+}
+
+/* ---------- Orden (local al instante, una sola llamada después) ---------- */
+// ¿Las tareas ya traen este orden? (taskReorder deja Orden = 1..n en ese mismo orden)
+function todoOrderSaved(ids, tasks) {
+  const pos = new Map(ids.map((id, i) => [id, i + 1]));
+  return tasks.every(t => !pos.has(t.id) || Number(t.orden) === pos.get(t.id));
+}
+// Mantiene el orden local sobre S.tasks: un bundle que llegue con el orden antiguo no mueve la lista.
+// Tras confirmar, se suelta cuando llega un bundle que ya trae el orden (o pasado TODO_ORDER_KEEP).
+function todoOrderSync() {
+  const o = TODO_STATE.order;
+  if (!o || !S) return;
+  const tasks = S.tasks || [];
+  if (o.seen !== tasks) {
+    if (o.done && (todoOrderSaved(o.ids, tasks) || Date.now() - o.done > TODO_ORDER_KEEP)) { TODO_STATE.order = null; return; }
+    o.seen = tasks;
+  }
+  const pos = new Map(o.ids.map((id, i) => [id, i + 1]));
+  tasks.forEach(t => { if (pos.has(t.id)) t.orden = pos.get(t.id); });
+}
+// Fija un orden nuevo: datos locales + filas en el DOM (sin redibujar) + guardado diferido.
+function todoSetOrder(ids, movedId) {
+  if (!S) return false;
+  const cur = todoPendingIds();
+  const real = (ids || []).filter((id, i, a) => id && !todoIsTmp(id) && cur.indexOf(id) >= 0 && a.indexOf(id) === i);
+  cur.forEach(id => { if (real.indexOf(id) < 0) real.push(id); });
+  if (!real.length || todoSameOrder(real, cur)) return false;
+  TODO_STATE.order = { ids: real, gen: ++TODO_STATE.orderGen, sent: 0, done: 0, seen: null };
+  todoOrderSync();
+  todoOrderDom(movedId);
+  todoQueueReorder();
+  return true;
+}
+function todoQueueReorder() {
+  clearTimeout(TODO_STATE.reorderTimer);
+  TODO_STATE.reorderTimer = setTimeout(todoSendReorder, TODO_REORDER_MS);
+}
+// Envía el orden final (una llamada; la respuesta liviana no se aplica: el orden local ya es la verdad).
+function todoSendReorder() {
+  clearTimeout(TODO_STATE.reorderTimer);
+  TODO_STATE.reorderTimer = 0;
+  const o = TODO_STATE.order;
+  if (!o || o.sent === o.gen) return;
+  if (TODO_STATE.drag && TODO_STATE.drag.active) { todoQueueReorder(); return; }   // al soltar viene otro orden
+  const ids = todoPendingIds();
+  if (!ids.length) { TODO_STATE.order = null; return; }
+  o.ids = ids; o.sent = o.gen; o.done = 0;
+  const gen = o.gen;
+  return optimistic(() => todoOrderSync(), 'taskReorder', [ids], { key: 'reorder', rerender: false, applyResult: false }).then(res => {
+    const now = TODO_STATE.order;
+    if (!now || now.gen !== gen) return;             // hubo otro cambio: lo guarda la próxima llamada
+    if (res == null) { TODO_STATE.order = null; return; }   // falló: Core avisa y recarga los datos reales
+    now.done = Date.now();
+  });
+}
+// Reordena las filas existentes según el orden local (mueve nodos; nada se redibuja) y conserva el foco.
+function todoOrderDom(movedId) {
+  if (typeof document === 'undefined' || !document.querySelectorAll) return;
+  const lists = document.querySelectorAll('[data-todo-list]');
+  if (!lists.length) return;
+  const order = todoData().pending.map(t => t.id);
+  const ae = document.activeElement;
+  Array.prototype.forEach.call(lists, list => {
+    const rows = new Map();
+    Array.prototype.forEach.call(list.children, r => { if (r.dataset && r.dataset.todoRow) rows.set(r.dataset.todoRow, r); });
+    let at = list.firstElementChild;
+    order.forEach(id => {
+      const node = rows.get(id);
+      if (!node) return;
+      if (node === at) { at = node.nextElementSibling; return; }
+      list.insertBefore(node, at);
+    });
+    todoSyncTools(list);
+  });
+  if (ae && ae !== document.activeElement && ae.isConnected) todoFocus(ae);
+  if (movedId) todoFlashRow(movedId);
+}
+// ↑ deshabilitado en la primera y ↓ en la última (las filas se movieron sin redibujar).
+function todoSyncTools(list) {
+  const rows = Array.prototype.filter.call(list.children, r => r.dataset && r.dataset.todoRow && !todoIsTmp(r.dataset.todoRow));
+  rows.forEach((r, i) => {
+    const up = r.querySelector('[data-action="todo.up"]'), dn = r.querySelector('[data-action="todo.down"]');
+    if (up) { if (i === 0) up.setAttribute('aria-disabled', 'true'); else up.removeAttribute('aria-disabled'); }
+    if (dn) { if (i === rows.length - 1) dn.setAttribute('aria-disabled', 'true'); else dn.removeAttribute('aria-disabled'); }
+  });
+}
+function todoMoveBy(id, dir) {
+  const ids = todoPendingIds();
+  const i = ids.indexOf(id), j = i + dir;
+  if (i < 0 || j < 0 || j >= ids.length) return false;
+  return todoSetOrder(todoMoveIds(ids, id, j), id);
+}
+
+/* ---------- Arrastrar para ordenar (mouse y táctil) · v3.6: la fila entera (SPEC §20) ---------- */
+// Sólo transform: la fila sigue al puntero y las demás le abren espacio. Se mide una vez al empezar
+// (coordenadas dentro del contenedor con scroll) y cada cuadro sólo escribe estilos que cambiaron.
+// Mouse: se presiona en cualquier parte de la fila (salvo el check, el candado o sus botones) y se mueve > 4 px.
+// Táctil: mantenerla presionada ~0,4 s y luego mover (si el dedo se mueve antes, es un desplazamiento normal).
+// En el panel lateral (pantalla ancha), sacarla del panel y soltarla sobre un proyecto de la vista la suma a él.
+const TODO_HOLD_MS = 400;
+function todoListEl(mode) { return document.querySelector('[data-todo-list="' + todoSel(mode) + '"]'); }
+// ¿El toque cae sobre algo que tiene su propio gesto (check, candado, botones, casillas, campos)?
+function todoNoDrag(t) {
+  return !t || !t.closest || !!t.closest('[data-todo-tools], [data-action="task.toggle"], [data-action="todo.share"], [data-action="todo.pick"], input, textarea, select, a');
+}
+function todoDragNew(row, list, p, extra) {
+  return Object.assign({
+    id: row.dataset.todoRow, mode: list.dataset.todoList, pointerId: null, touch: false,
+    startX: p.clientX, startY: p.clientY, x: p.clientX, y: p.clientY,
+    active: false, raf: 0, items: [], from: -1, to: -1, dy: null, offY: null, slot: 0, row: null, sc: null,
+    proj: false, over: null, ghost: null,
+  }, extra || {});
+}
+function todoOnPointerDown(ev) {
+  if (ev.target.closest && ev.target.closest('[data-todo-keepfocus]')) { ev.preventDefault(); return; }
+  if (ev.pointerType === 'touch' || ev.button !== 0 || TODO_STATE.drag || TODO_STATE.select) return;   // táctil: todoOnTouchStart
+  const row = ev.target.closest && ev.target.closest('[data-todo-row]');
+  const list = row && row.closest('[data-todo-list]');
+  if (!row || !list || todoIsTmp(row.dataset.todoRow) || todoNoDrag(ev.target)) return;
+  ev.preventDefault();                                   // sin selección de texto (si no se arrastra, el clic llega igual)
+  TODO_STATE.drag = todoDragNew(row, list, ev, { pointerId: ev.pointerId });
+  document.addEventListener('pointermove', todoOnPointerMove);
+  document.addEventListener('pointerup', todoOnPointerUp);
+  document.addEventListener('pointercancel', todoOnPointerCancel);
+}
+function todoOnPointerMove(ev) {
+  const d = TODO_STATE.drag;
+  if (!d || d.touch || ev.pointerId !== d.pointerId) return;
+  d.x = ev.clientX; d.y = ev.clientY;
+  if (!d.active) {
+    if (Math.abs(d.x - d.startX) < 4 && Math.abs(d.y - d.startY) < 4) return;
+    if (!todoDragActivate(d)) { todoDragEnd(false); return; }
+    // La captura recién aquí: un clic sin mover sigue llegando al título (abre la tarea)
+    try { d.row.setPointerCapture(ev.pointerId); } catch (e) {}
+  }
+  ev.preventDefault();
+}
+function todoOnPointerUp(ev) {
+  const d = TODO_STATE.drag;
+  if (!d || d.touch || ev.pointerId !== d.pointerId) return;
+  d.x = ev.clientX; d.y = ev.clientY;
+  todoDragEnd(true);
+}
+function todoOnPointerCancel(ev) { const d = TODO_STATE.drag; if (d && !d.touch && ev.pointerId === d.pointerId) todoDragEnd(false); }
+// Táctil: mantener presionada la fila para tomarla
+function todoOnTouchStart(ev) {
+  todoHoldCancel();
+  if (!ev.touches || ev.touches.length !== 1 || TODO_STATE.drag || TODO_STATE.select) return;
+  const row = ev.target.closest && ev.target.closest('[data-todo-row]');
+  const list = row && row.closest('[data-todo-list]');
+  if (!row || !list || todoIsTmp(row.dataset.todoRow) || todoNoDrag(ev.target)) return;
+  const p = ev.touches[0];
+  const h = { row: row, list: list, x: p.clientX, y: p.clientY, timer: 0 };
+  h.timer = setTimeout(() => todoHoldFire(h), TODO_HOLD_MS);
+  TODO_STATE.hold = h;
+}
+function todoHoldCancel() {
+  const h = TODO_STATE.hold;
+  if (h) { clearTimeout(h.timer); TODO_STATE.hold = null; }
+}
+function todoHoldFire(h) {
+  if (TODO_STATE.hold !== h) return;
+  TODO_STATE.hold = null;
+  if (!h.row.isConnected || TODO_STATE.drag || TODO_STATE.select) return;
+  const d = todoDragNew(h.row, h.list, { clientX: h.x, clientY: h.y }, { touch: true });
+  TODO_STATE.drag = d;
+  if (!todoDragActivate(d)) { TODO_STATE.drag = null; return; }
+  try { if (navigator.vibrate) navigator.vibrate(10); } catch (e) { /* sin vibración */ }
+}
+function todoOnTouchMove(ev) {
+  const d = TODO_STATE.drag, p = ev.touches && ev.touches[0];
+  if (d && d.touch && d.active) {
+    if (ev.cancelable) ev.preventDefault();             // arrastrando: la lista no se desplaza
+    if (p) { d.x = p.clientX; d.y = p.clientY; }
+    return;
+  }
+  const h = TODO_STATE.hold;
+  if (h && p && (Math.abs(p.clientX - h.x) > 8 || Math.abs(p.clientY - h.y) > 8)) todoHoldCancel();   // es un desplazamiento
+}
+function todoOnTouchEnd(ev) {
+  todoHoldCancel();
+  const d = TODO_STATE.drag;
+  if (d && d.touch) todoDragEnd(ev.type === 'touchend');
+}
+// Empieza a moverse: mide la lista, levanta la fila y toma el control (ni «deslizar de lado» ni «actualizar»)
+function todoDragActivate(d) {
+  if (!todoDragBind(d)) return false;
+  d.active = true;
+  if (typeof gestureCancel === 'function') gestureCancel();
+  document.body.style.cursor = 'grabbing';
+  document.body.style.userSelect = 'none';
+  d.raf = requestAnimationFrame(todoDragFrame);
+  return true;
+}
+// Fuera del panel lateral: sobre un proyecto de la vista ([data-drop-project]) se resalta y un chip sigue al puntero.
+// → true mientras el puntero está fuera del panel (no se reordena).
+function todoDropCheck(d) {
+  if (d.mode !== 'aside' || typeof document.elementFromPoint !== 'function') return false;
+  const panel = d.row.closest('[data-todo-panel]');
+  const pr = panel ? panel.getBoundingClientRect() : null;
+  if (!pr || (d.x >= pr.left - 4 && d.x <= pr.right + 4)) { if (d.proj) todoProjMode(d, false); return false; }
+  if (!d.proj) todoProjMode(d, true);
+  const el = document.elementFromPoint(d.x, d.y);
+  const target = el && el.closest ? el.closest('[data-drop-project]') : null;
+  if (target !== d.over) {
+    if (d.over) d.over.removeAttribute('data-drop-on');
+    d.over = target;
+    if (target) target.setAttribute('data-drop-on', '');
+    const p = target ? IDX.project.get(target.getAttribute('data-drop-project')) : null;
+    const t = IDX.task.get(d.id);
+    const label = d.ghost && d.ghost.querySelector('[data-ghost-label]');
+    if (label) label.textContent = p ? 'Mover a «' + p.nombre + '»' : (t ? t.nombre : 'Tarea');
+    if (d.ghost) { if (p) d.ghost.setAttribute('data-on', ''); else d.ghost.removeAttribute('data-on'); }
+  }
+  if (d.ghost) d.ghost.style.transform = 'translate(' + Math.round(d.x + 14) + 'px,' + Math.round(d.y + 12) + 'px)';
+  return true;
+}
+function todoProjMode(d, on) {
+  d.proj = on;
+  if (on) {
+    // La fila vuelve a su lugar (atenuada) y las demás también; un chip con el nombre sigue al puntero
+    d.items.forEach(x => { x.shift = 0; if (x.el !== d.row) x.el.style.transform = ''; });
+    d.to = d.from; d.dy = null;
+    d.row.style.transform = '';
+    d.row.style.opacity = '.45';
+    const t = IDX.task.get(d.id);
+    const g = document.createElement('div');
+    g.className = 'todo-ghost';
+    g.setAttribute('aria-hidden', 'true');
+    g.innerHTML = icon('folder-input', 'size-3.5 shrink-0') + '<span data-ghost-label class="truncate">' + esc(t ? t.nombre : 'Tarea') + '</span>';
+    document.body.appendChild(g);
+    refreshIcons(g);
+    d.ghost = g;
+    return;
+  }
+  d.row.style.opacity = '';
+  if (d.ghost) { d.ghost.remove(); d.ghost = null; }
+  if (d.over) { d.over.removeAttribute('data-drop-on'); d.over = null; }
+}
+// Soltada sobre un proyecto: se suma a él (pública, pilar del proyecto) y sigue en «Mis tareas»
+function todoDropOnProject(id, pid) {
+  const t = IDX.task.get(id), p = IDX.project.get(pid);
+  if (!t || !p) return;
+  if ((t.proyecto || '') === pid) { toast('Ya está en «' + p.nombre + '»', 'info'); return; }
+  todoMoveTo(id, pid);
+}
+// Mide las filas de la lista (una vez) y prepara la fila arrastrada.
+function todoDragBind(d) {
+  const list = todoListEl(d.mode);
+  const row = list && list.querySelector('[data-todo-row="' + todoSel(d.id) + '"]');
+  const sc = list ? todoScrollParent(list) : null;
+  if (!row || !sc) return false;
+  const rows = Array.prototype.filter.call(list.children, r => r.dataset && r.dataset.todoRow);
+  rows.forEach(r => { r.removeAttribute('data-todo-nt'); r.style.transition = 'none'; r.style.transform = ''; });
+  const sr = sc.getBoundingClientRect();
+  d.items = rows.map(r => { const b = r.getBoundingClientRect(); return { el: r, id: r.dataset.todoRow, top: b.top - sr.top + sc.scrollTop, h: b.height, shift: 0 }; });
+  d.from = rows.indexOf(row);
+  d.to = d.from;
+  d.row = row; d.sc = sc; d.dy = null;
+  const it = d.items[d.from];
+  const gap = d.items.length > 1 ? Math.max(0, d.items[1].top - d.items[0].top - d.items[0].h) : 0;
+  d.slot = it.h + gap;
+  if (d.offY == null) d.offY = d.startY - sr.top + sc.scrollTop - it.top;   // dónde se tomó la fila
+  rows.forEach(r => { if (r !== row) r.style.transition = TODO_EASE; });
+  const dark = todoIsDark();
+  Object.assign(row.style, {
+    position: 'relative', zIndex: '30', willChange: 'transform', transition: 'box-shadow .15s ease',
+    backgroundColor: dark ? '#27272a' : '#ffffff',
+    boxShadow: dark ? '0 0 0 1px rgb(255 255 255 / .1), 0 12px 28px -8px rgb(0 0 0 / .6)' : '0 0 0 1px rgb(24 24 27 / .08), 0 12px 28px -10px rgb(24 24 27 / .28)',
+  });
+  return true;
+}
+function todoDragRebind(d) {
+  if (!todoDragBind(d)) return false;
+  const sr = d.sc.getBoundingClientRect();
+  todoDragLayout(d, d.y - sr.top + d.sc.scrollTop);
+  return true;
+}
+// Un cuadro: desplazamiento automático cerca de los bordes + posiciones (sólo transform).
+function todoDragFrame() {
+  const d = TODO_STATE.drag;
+  if (!d || !d.active) return;
+  d.raf = requestAnimationFrame(todoDragFrame);
+  if (!d.row || !d.row.isConnected) { if (!todoDragRebind(d)) todoDragEnd(false); return; }
+  if (todoDropCheck(d)) return;                          // fuera del panel: sobre los proyectos de la vista
+  const sc = d.sc, sr = sc.getBoundingClientRect(), edge = 48;
+  let v = 0;
+  if (d.y < sr.top + edge) v = -Math.ceil((sr.top + edge - d.y) / edge * 14);
+  else if (d.y > sr.bottom - edge) v = Math.ceil((d.y - (sr.bottom - edge)) / edge * 14);
+  if (v) {
+    sc.scrollTop += Math.max(-20, Math.min(20, v));
+    if (sc.dataset && sc.dataset.todoScroll) TODO_STATE.scroll[sc.dataset.todoScroll] = sc.scrollTop;
+  }
+  todoDragLayout(d, d.y - sr.top + sc.scrollTop);
+}
+// py = puntero en coordenadas del contenido del contenedor. La fila no sale de los bordes de la lista.
+function todoDragLayout(d, py) {
+  const items = d.items, it = items[d.from], last = items[items.length - 1];
+  if (!it) return;
+  const top = Math.max(items[0].top, Math.min(last.top + last.h - it.h, py - d.offY));
+  const dy = Math.round(top - it.top);
+  if (dy !== d.dy) { d.dy = dy; d.row.style.transform = 'translateY(' + dy + 'px) scale(1.015)'; }
+  const c = top + it.h / 2;
+  let to = d.from;
+  for (let i = d.from + 1; i < items.length && c > items[i].top + items[i].h / 2; i++) to = i;
+  if (to === d.from) for (let i = d.from - 1; i >= 0 && c < items[i].top + items[i].h / 2; i--) to = i;
+  if (to === d.to) return;
+  d.to = to;
+  items.forEach((x, i) => {
+    if (i === d.from) return;
+    const s = i > d.from && i <= to ? -d.slot : i < d.from && i >= to ? d.slot : 0;
+    if (s !== x.shift) { x.shift = s; x.el.style.transform = s ? 'translateY(' + s + 'px)' : ''; }
+  });
+}
+function todoDragEnd(commit) {
+  const d = TODO_STATE.drag;
+  if (!d) return;
+  TODO_STATE.drag = null;
+  if (d.raf) cancelAnimationFrame(d.raf);
+  document.removeEventListener('pointermove', todoOnPointerMove);
+  document.removeEventListener('pointerup', todoOnPointerUp);
+  document.removeEventListener('pointercancel', todoOnPointerCancel);
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+  if (!d.active || !d.row) return;
+  TODO_STATE.noClickUntil = Date.now() + 400;            // el clic que sigue al arrastre no abre la tarea
+  if (commit && d.row.isConnected) todoDropCheck(d);    // con la posición final (un movimiento rápido no se pierde)
+  const target = d.proj && d.over ? d.over.getAttribute('data-drop-project') : '';
+  if (d.proj) todoProjMode(d, false);
+  const row = d.row, items = d.items, live = row.isConnected;
+  const released = live ? row.getBoundingClientRect().top : 0;
+  Object.assign(row.style, { position: '', zIndex: '', willChange: '', backgroundColor: '', boxShadow: '' });
+  const clearLater = () => setTimeout(() => { if (!TODO_STATE.drag) items.forEach(x => { x.el.style.transition = ''; }); }, 220);
+  if (target) {
+    row.style.transition = TODO_EASE;
+    items.forEach(x => { x.el.style.transform = ''; });
+    clearLater();
+    if (commit) todoDropOnProject(d.id, target);
+    return;
+  }
+  if (!commit || !live || d.to < 0 || d.to === d.from) {
+    // Vuelve a su lugar con la misma transición.
+    row.style.transition = TODO_EASE;
+    items.forEach(x => { x.el.style.transform = ''; });
+    clearLater();
+    return;
+  }
+  // Las filas quedan donde se ven: sin transición se quitan los desplazamientos y se mueven los nodos.
+  items.forEach(x => { x.el.style.transition = 'none'; x.el.style.transform = ''; });
+  todoSetOrder(todoMoveIds(items.map(x => x.id), d.id, d.to), d.id);
+  // La fila soltada se desliza desde donde quedó hasta su lugar (FLIP).
+  const delta = released - row.getBoundingClientRect().top;
+  if (Math.abs(delta) > 1) {
+    row.style.transform = 'translateY(' + delta + 'px)';
+    void row.offsetHeight;
+    row.style.transition = TODO_EASE;
+    row.style.transform = '';
+  }
+  clearLater();
+}
+
+/* ---------- Teclado: Alt+↑/↓ mueve la fila; ↑/↓ recorre las tareas ---------- */
+function todoOnKeyDown(ev) {
+  if (TODO_STATE.drag && ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); todoDragEnd(false); return; }
+  if (TODO_STATE.picking) return;                 // el menú de fecha (pickDate) maneja sus teclas
+  const t = ev.target;
+  // Esc sale del modo selección (antes que cerrar la hoja; un modal abierto se cierra primero, y un campo
+  // fuera del panel conserva su Esc).
+  if (ev.key === 'Escape' && TODO_STATE.select && !(typeof MODALS !== 'undefined' && MODALS.length)) {
+    const typing = t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') && !(t.closest && t.closest('[data-todo-panel]'));
+    if (!typing && document.querySelector('[data-todo-panel]')) { ev.preventDefault(); ev.stopPropagation(); todoSelEnd(true); return; }
+  }
+  // En el alta rápida: Esc borra lo escrito (sin cerrar la hoja); ↓ baja a la primera tarea.
+  if (t && t.dataset && t.dataset.todoAdd) {
+    if (ev.key === 'Escape' && t.value) {
+      ev.preventDefault(); ev.stopPropagation();
+      t.value = ''; TODO_STATE.draft = ''; TODO_STATE.ignore = ''; todoSyncChip(t);
+    } else if (ev.key === 'ArrowDown' && !ev.altKey && !ev.shiftKey) {
+      const panel = t.closest('[data-todo-panel]');
+      const first = panel && panel.querySelector('[data-todo-title]');
+      if (first) { ev.preventDefault(); first.focus(); }
+    }
+    return;
+  }
+  if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+  if (!t || !t.closest || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || ev.metaKey || ev.ctrlKey) return;
+  const row = t.closest('[data-todo-row]');
+  const panel = row && row.closest('[data-todo-panel]');
+  if (!row || !panel) return;
+  const dir = ev.key === 'ArrowUp' ? -1 : 1;
+  if (ev.altKey) {
+    if (!row.closest('[data-todo-list]') || TODO_STATE.select) return;   // seleccionando no se reordena
+    ev.preventDefault();
+    const id = row.dataset.todoRow, mode = panel.dataset.todoPanel;
+    if (todoMoveBy(id, dir)) {
+      // El foco sigue a la tarea (si estaba en un botón sin id, va al título).
+      const ae = document.activeElement;
+      if (!ae || ae === document.body || !document.contains(ae)) todoFocus(document.getElementById('todo-t-' + mode + '-' + id));
+      const moved = panel.querySelector('[data-todo-list] [data-todo-row="' + todoSel(id) + '"]');
+      if (moved) todoReveal(moved);
+      todoAnnounce(dir < 0 ? 'Tarea subida' : 'Tarea bajada');
+    }
+    return;
+  }
+  if (ev.shiftKey || !t.hasAttribute('data-todo-title')) return;
+  const titles = Array.prototype.slice.call(panel.querySelectorAll('[data-todo-title]'));
+  const i = titles.indexOf(t);
+  const next = titles[i + dir] || (i === 0 && dir < 0 ? panel.querySelector('[data-todo-add], [data-todo-selall]') : null);
+  if (next) { ev.preventDefault(); next.focus(); }
+}
+// El mouse no quita el foco del alta rápida al tocar la ✕ de la fecha (ni selecciona texto con Shift+clic al marcar
+// un rango). Tomar una fila para arrastrarla ya evita la selección en todoOnPointerDown.
+function todoOnMouseDown(ev) {
+  if (!ev.target.closest) return;
+  if (ev.target.closest('[data-todo-keepfocus]')) ev.preventDefault();
+  else if (ev.shiftKey && TODO_STATE.select && ev.target.closest('[data-todo-panel] [data-action="todo.pick"]')) ev.preventDefault();
+}
+function todoOnScroll(ev) {
+  const t = ev.target;
+  if (t && t.dataset && t.dataset.todoScroll) TODO_STATE.scroll[t.dataset.todoScroll] = t.scrollTop;
+}
+function todoOnBreakpoint() {
+  if (!S || !S.route) return;
+  if (todoIsWide() && currentDrawerKey() === 'todo') closeDrawer();
+  if (document.querySelector('#view [data-todo-layout]')) rerender();
+}
+// Si la pestaña se oculta con un orden por guardar, se envía ya (no espera la pausa).
+function todoOnVisibility() {
+  if (document.hidden && TODO_STATE.reorderTimer) todoSendReorder();
+}
+// Escuchas globales, una sola vez (se llama al dibujar: el nivel superior sólo declara).
+function todoInstall() {
+  if (TODO_STATE.installed || typeof document === 'undefined' || !document.addEventListener) return;
+  TODO_STATE.installed = true;
+  document.addEventListener('pointerdown', todoOnPointerDown);
+  document.addEventListener('mousedown', todoOnMouseDown);
+  // v3.6: táctil = mantener presionada para arrastrar; tras arrastrar, el clic no abre la tarea; sin menú del navegador
+  document.addEventListener('touchstart', todoOnTouchStart, { passive: true });
+  document.addEventListener('touchmove', todoOnTouchMove, { passive: false });
+  document.addEventListener('touchend', todoOnTouchEnd);
+  document.addEventListener('touchcancel', todoOnTouchEnd);
+  document.addEventListener('click', ev => {
+    if (TODO_STATE.noClickUntil && Date.now() < TODO_STATE.noClickUntil) { TODO_STATE.noClickUntil = 0; ev.preventDefault(); ev.stopPropagation(); }
+  }, true);
+  document.addEventListener('contextmenu', ev => { if (TODO_STATE.hold || TODO_STATE.drag) ev.preventDefault(); });
+  document.addEventListener('keydown', todoOnKeyDown, true);
+  document.addEventListener('scroll', todoOnScroll, true);
+  document.addEventListener('visibilitychange', todoOnVisibility);
+  try {
+    const mq = window.matchMedia && matchMedia(TODO_WIDE_MQ);
+    if (mq) { if (mq.addEventListener) mq.addEventListener('change', todoOnBreakpoint); else if (mq.addListener) mq.addListener(todoOnBreakpoint); }
+  } catch (e) {}
+  // Cada vez que se redibuja la vista: píldora, scroll del panel y resaltados (aunque la vista no llame a todoMount).
+  try {
+    const v = document.getElementById('view');
+    if (v && window.MutationObserver) new MutationObserver(() => todoAfterRender()).observe(v, { childList: true });
+  } catch (e) {}
+}
+
+/* ---------- Mover a proyecto ---------- */
+function todoTaskPayload(t, over) {
+  return Object.assign({
+    tipo: 'Tarea', id: t.id, pilar: t.pilar || '', proyecto: t.proyecto || '', nombre: t.nombre || '', detalle: t.detalle || '',
+    resp: t.resp || '', fecha: t.fecha || '', cascade: t.cascade || '',
+    evidencias: (t.evidencias || []).map(e => ({ t: String((e && e.t) || ''), u: String((e && e.u) || '') })),
+    avisar: t.avisar !== false, privada: t.privada === true,
+  }, over || {});
+}
+// v3.4 (SPEC §18): sin control de versión (base): se ve al instante y el último cambio gana.
+function todoMoveTo(id, pid) {
+  const t = IDX.task.get(id);
+  if (!t || todoIsTmp(id)) return;
+  pid = pid || '';
+  if ((t.proyecto || '') === pid) return;
+  const p = pid ? IDX.project.get(pid) : null;
+  if (pid && !p) { toast('Ese proyecto ya no existe. Actualiza los datos.', 'error'); return; }
+  const pilar = p ? p.pilar : (t.pilar || '');
+  let cascade = t.cascade || '';
+  if (p) {
+    // El indicador Cascade de otro pilar no viaja; si no tiene, hereda el del proyecto (como el formulario).
+    const c = cascade && IDX.cascade ? IDX.cascade.get(cascade) : null;
+    if (cascade && (!c || c.pilar !== p.pilar)) cascade = '';
+    if (!cascade && typeof fgProjCascade === 'function') { try { cascade = fgProjCascade(p) || ''; } catch (e) { cascade = ''; } }
+  }
+  // §15: en un proyecto la tarea es del equipo (pública); «Sin proyecto» conserva su privacidad.
+  const wasPriv = t.privada === true;
+  const privada = p ? false : wasPriv;
+  if (p) delete TODO_STATE.priv[id];               // este cambio es más nuevo que uno de privacidad en vuelo
+  const payload = todoTaskPayload(t, { proyecto: pid, pilar: pilar, cascade: cascade, privada: privada });
+  TODO_STATE.flash = id;
+  return optimistic(() => { t.proyecto = pid; t.pilar = pilar; t.cascade = cascade; t.privada = privada; }, 'gSave', [payload],
+    { success: p ? 'Movida a «' + p.nombre + '»' + (wasPriv ? '. Ahora la ve el equipo' : '') : 'Quedó sin proyecto' });
+}
+function todoOpenMove(id) {
+  const t = IDX.task.get(id);
+  if (!t || todoIsTmp(id)) return;
+  const cur = t.proyecto || '';
+  const opt = (pid, label, sub, ic, on) => '<button type="button" data-todo-pick="' + esc(pid) + '" data-name="' + esc(normTxt(label)) + '" aria-current="' + (on ? 'true' : 'false') + '" class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition hover:bg-zinc-100 focus-visible:bg-zinc-100 focus-visible:outline-none dark:hover:bg-zinc-800 dark:focus-visible:bg-zinc-800 ' +
+    (on ? 'font-medium text-indigo-700 dark:text-indigo-300' : 'text-zinc-700 dark:text-zinc-200') + '">' + icon(ic, 'size-4 shrink-0 text-zinc-400 dark:text-zinc-500') +
+    '<span class="min-w-0 flex-1 truncate">' + esc(label) + '</span>' + (sub ? '<span class="shrink-0 text-[11px] text-zinc-400 dark:text-zinc-500">' + esc(sub) + '</span>' : '') +
+    (on ? icon('check', 'size-4 shrink-0 text-indigo-500 dark:text-indigo-400') : '') + '</button>';
+  const groups = (S.pillars || []).map(pl => {
+    const items = (S.projects || []).filter(p => p.pilar === pl.key && (p.estado !== 'Cerrado' || p.id === cur))
+      .sort((a, b) => ((a.estado === 'Activo' ? 0 : 1) - (b.estado === 'Activo' ? 0 : 1)) || String(a.nombre).localeCompare(String(b.nombre), 'es'));
+    if (!items.length) return '';
+    return '<div data-todo-group class="pt-2"><p class="flex items-center gap-1.5 px-2.5 pb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500">' +
+      '<span class="grid size-4 place-items-center rounded ' + tone(pl.color).iconbox + '">' + icon(pl.icon, 'size-3') + '</span>' + esc(pl.label) + '</p>' +
+      items.map(p => opt(p.id, p.nombre, p.estado === 'Activo' ? '' : p.estado, 'folder-kanban', p.id === cur)).join('') + '</div>';
+  }).join('');
+  const body = '<div class="relative"><span class="pointer-events-none absolute inset-y-0 left-3 grid place-items-center text-zinc-400">' + icon('search', 'size-4') + '</span>' +
+    '<input type="search" data-todo-movesearch placeholder="Buscar proyecto…" aria-label="Buscar proyecto" autocomplete="off" class="' + CX.input + ' pl-9"></div>' +
+    '<div class="-mx-1 mt-2 max-h-[50vh] overflow-y-auto overscroll-contain px-1">' + opt('', 'Sin proyecto', '', 'folder-x', !cur) + groups +
+    (groups ? '' : '<p class="px-2.5 py-4 text-sm text-zinc-500 dark:text-zinc-400">Aún no hay proyectos activos.</p>') +
+    '<p data-todo-noresults class="hidden px-2.5 py-6 text-center text-sm text-zinc-500 dark:text-zinc-400">Sin resultados.</p></div>';
+  openModal({
+    size: 'sm', title: 'Mover a proyecto', subtitle: esc(t.nombre),
+    iconHtml: '<div class="grid size-10 shrink-0 place-items-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-black/5 dark:bg-indigo-500/15 dark:text-indigo-300 dark:ring-white/5">' + icon('folder-input', 'size-5') + '</div>',
+    body: body,
+    onMount: (el, close) => {
+      const q = el.querySelector('[data-todo-movesearch]');
+      const picks = () => Array.prototype.slice.call(el.querySelectorAll('[data-todo-pick]'));
+      const visible = () => picks().filter(b => !b.classList.contains('hidden'));
+      q.addEventListener('input', () => {
+        const s = normTxt(q.value);
+        let any = false;
+        picks().forEach(b => { const hit = !s || b.dataset.name.indexOf(s) >= 0; b.classList.toggle('hidden', !hit); if (hit && b.dataset.todoPick) any = true; });
+        el.querySelectorAll('[data-todo-group]').forEach(g => g.classList.toggle('hidden', !g.querySelector('[data-todo-pick]:not(.hidden)')));
+        const nr = el.querySelector('[data-todo-noresults]');
+        if (nr) nr.classList.toggle('hidden', !s || any);
+      });
+      q.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const v = visible().filter(b => !q.value.trim() || b.dataset.todoPick);
+          if (v[0]) v[0].click();
+        } else if (e.key === 'ArrowDown') {
+          const v = visible();
+          if (v[0]) { e.preventDefault(); v[0].focus(); }
+        }
+      });
+      el.addEventListener('keydown', e => {
+        const b = e.target.closest && e.target.closest('[data-todo-pick]');
+        if (!b || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+        const v = visible(), i = v.indexOf(b) + (e.key === 'ArrowDown' ? 1 : -1);
+        e.preventDefault();
+        if (i < 0) q.focus(); else if (v[i]) v[i].focus();
+      });
+      el.addEventListener('click', e => {
+        const b = e.target.closest && e.target.closest('[data-todo-pick]');
+        if (!b) return;
+        close();
+        todoMoveTo(id, b.dataset.todoPick);
+      });
+    },
+  });
+}
+// Menú de la fila en pantallas táctiles (en escritorio, la barra flotante hace lo mismo).
+function todoOpenMenu(id) {
+  const t = IDX.task.get(id);
+  if (!t) return;
+  const item = (ic, label, act, dis) => '<button type="button" data-action="' + act + '" data-id="' + esc(id) + '"' + (dis ? ' disabled' : '') +
+    ' class="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:opacity-40 dark:text-zinc-100 dark:hover:bg-zinc-800">' +
+    icon(ic, 'size-4 text-zinc-500 dark:text-zinc-400') + esc(label) + '</button>';
+  const name = String(t.nombre || 'Tarea');
+  openModal({
+    size: 'sm', title: name.length > 80 ? name.slice(0, 79) + '…' : name, autofocus: false,
+    // v3.6 (SPEC §20): para ordenar, mantener presionada la tarea y arrastrarla
+    body: '<div class="-mx-2 -my-1 grid gap-0.5">' + item('user-round-plus', 'Personas', 'todo.people') +
+      item('folder-input', 'Mover a proyecto', 'todo.move') + item('pencil', 'Editar', 'todo.edit') + '</div>',
+    onMount: (el, close) => el.addEventListener('click', e => {
+      const b = e.target.closest && e.target.closest('[data-action]');
+      if (b && !b.disabled && b.dataset.action !== 'modal.close') close();
+    }),
+  });
+}
+
+/* ---------- Privacidad (§15): candado de un clic y cambios en grupo ---------- */
+// Optimista + UNA llamada tasksSetPrivacy(ids, privada) con la clave 'privacy' (sólo se aplica la respuesta más nueva).
+// msg: toast al confirmar (sólo el de la última llamada); undo: acción «Deshacer» del toast.
+function todoSetPrivacy(ids, privada, msg, undo) {
+  if (!S || !IDX.task) return Promise.resolve(null);
+  const list = (ids || []).filter((id, i, a) => id && !todoIsTmp(id) && a.indexOf(id) === i && IDX.task.has(id));
+  if (!list.length) return Promise.resolve(null);
+  const priv = privada === true;
+  if (!TODO_STATE.privFlying) TODO_STATE.privForced = false;
+  TODO_STATE.privFlying++;
+  const seq = ++TODO_STATE.privSeq;
+  list.forEach(id => { TODO_STATE.priv[id] = priv; });
+  return optimistic(() => { list.forEach(id => { const t = IDX.task.get(id); if (t) t.privada = priv; }); },
+    'tasksSetPrivacy', [list, priv], { key: 'privacy' }).then(res => {
+    TODO_STATE.privFlying = Math.max(0, TODO_STATE.privFlying - 1);
+    if (res == null) { TODO_STATE.priv = {}; TODO_STATE.privForced = false; return res; }   // falló: Core avisa y recarga
+    if (msg && seq === TODO_STATE.privSeq) toast(msg, 'success', undo ? { actionLabel: 'Deshacer', onAction: undo } : undefined);
+    if (!TODO_STATE.privFlying) {
+      // Una respuesta más nueva pudo leerse antes que otra escritura: si hubo que corregir (o lo que llegó no trae
+      // lo pedido), se traen los datos reales.
+      const pv = TODO_STATE.priv;
+      const off = TODO_STATE.privForced || Object.keys(pv).some(id => { const t = IDX.task.get(id); return t && t.privada !== pv[id]; });
+      TODO_STATE.priv = {};
+      TODO_STATE.privForced = false;
+      if (off) refreshData(true);
+    }
+    return res;
+  });
+}
+// Candado de una fila privada: la comparte con el equipo al tiro (con «Deshacer» si puedo volver a hacerla privada).
+function todoShare(id) {
+  const t = IDX.task && IDX.task.get(id);
+  if (!t || todoIsTmp(id) || t.privada !== true) return null;
+  const undo = todoKnownMe() ? () => todoSetPrivacy([id], true, 'Volvió a ser privada') : null;
+  return todoSetPrivacy([id], false, 'Ahora la ve el equipo', undo);
+}
+
+/* ---------- Modo selección ---------- */
+function todoSelRedraw() {
+  if (typeof document === 'undefined') return;
+  if (currentDrawerKey() === 'todo') refreshDrawer();      // la hoja: también su botón del encabezado
+  todoRefresh(true);
+}
+function todoSelStart() {
+  if (!S || TODO_STATE.select || (TODO_STATE.drag && TODO_STATE.drag.active) || !myEmail()) return false;
+  if (!todoPendingIds().length) return false;
+  TODO_STATE.select = { ids: new Set(), anchor: '' };
+  TODO_STATE.selAnim = true;
+  todoSelRedraw();
+  return true;
+}
+// refocus: el foco vuelve al botón «Seleccionar» si quedó en una casilla que ya no existe.
+function todoSelEnd(refocus) {
+  if (!TODO_STATE.select) return false;
+  TODO_STATE.select = null;
+  TODO_STATE.selAnim = false;
+  todoSelRedraw();
+  if (refocus && typeof document !== 'undefined') {
+    const ae = document.activeElement;
+    if (!ae || ae === document.body || !ae.isConnected) {
+      todoFocus(document.getElementById(currentDrawerKey() === 'todo' ? 'todo-sel-sheet' : 'todo-sel-aside'));
+    }
+  }
+  return true;
+}
+// Clic en una fila: marca o desmarca. Shift+clic: todo el rango desde la última tocada queda como la tocada.
+function todoPick(id, shift) {
+  const sel = TODO_STATE.select;
+  if (!sel) return false;
+  const ids = todoPendingIds(), at = ids.indexOf(id);
+  if (at < 0) return false;
+  const on = !sel.ids.has(id);
+  const from = shift && sel.anchor ? ids.indexOf(sel.anchor) : -1;
+  const range = from >= 0 ? ids.slice(Math.min(from, at), Math.max(from, at) + 1) : [id];
+  range.forEach(x => { if (on) sel.ids.add(x); else sel.ids.delete(x); });
+  sel.anchor = id;
+  todoRefresh();
+  return true;
+}
+// «Todas»: si ya están todas, ninguna.
+function todoSelAll() {
+  const sel = TODO_STATE.select;
+  if (!sel) return false;
+  const ids = todoPendingIds();
+  const all = ids.length > 0 && ids.every(id => sel.ids.has(id));
+  sel.ids = all ? new Set() : new Set(ids);
+  sel.anchor = '';
+  todoRefresh();
+  return true;
+}
+// «Hacer públicas» / «Hacer privadas»: cambio local inmediato y UNA llamada con todas las seleccionadas.
+function todoSelApply(privada) {
+  const sel = TODO_STATE.select;
+  if (!sel) return null;
+  const priv = privada === true;
+  const ids = todoPendingIds().filter(id => sel.ids.has(id));
+  if (!ids.length) return null;
+  if (priv && !todoKnownMe()) { toast('No pude identificar tu cuenta de Google: por ahora las tareas quedan compartidas.', 'info'); return null; }
+  const n = ids.filter(id => { const t = IDX.task.get(id); return t && (t.privada === true) !== priv; }).length;
+  if (!n) return null;
+  TODO_STATE.select = null;                        // el redibujo optimista ya muestra la lista normal
+  TODO_STATE.selAnim = false;
+  const msg = priv ? (n === 1 ? 'Ahora es privada' : n + ' tareas ahora son privadas') : (n === 1 ? 'Ahora la ve el equipo' : 'Ahora el equipo ve estas ' + n + ' tareas');
+  return todoSetPrivacy(ids, priv, msg);
+}
+
+/* ---------- Acciones ---------- */
+action('todo.share', d => { todoShare(d.id); });
+action('todo.select', () => { if (TODO_STATE.select) todoSelEnd(false); else todoSelStart(); });
+action('todo.selCancel', () => { todoSelEnd(true); });
+action('todo.pick', (d, el, ev) => { todoPick(d.id, !!(ev && ev.shiftKey)); });
+action('todo.selAll', () => { todoSelAll(); });
+action('todo.selApply', d => { todoSelApply(d.value === '1'); });
+action('todo.add', (d, el) => { todoAdd(el); });
+action('todo.typing', (d, el) => {
+  TODO_STATE.draft = el.value;
+  if (!el.value.trim()) TODO_STATE.ignore = '';
+  todoSyncChip(el, true);
+});
+action('todo.ignoreDate', (d, el) => {
+  const box = el.closest('[data-todo-chip]');
+  const inp = box && box.parentElement ? box.parentElement.querySelector('[data-todo-add]') : null;
+  if (!inp) return;
+  const p = todoParse(inp.value, todayStr());
+  if (p.token) TODO_STATE.ignore = todoNorm(p.token);
+  todoSyncChip(inp);
+  inp.focus();
+});
+action('todo.open', d => { if (d.id && !todoIsTmp(d.id) && typeof openTask === 'function') openTask(d.id); });
+// «Editar» (barra flotante o menú ⋯) abre directo el formulario de la tarea; si no existe, su tarjeta
+action('todo.edit', d => {
+  if (!d.id || todoIsTmp(d.id)) return;
+  if (typeof openTaskForm === 'function') openTaskForm({ id: d.id });
+  else if (typeof openTask === 'function') openTask(d.id);
+});
+action('todo.up', d => { if (TODO_STATE.select || !todoMoveBy(d.id, -1)) return; todoAnnounce('Tarea subida'); });
+action('todo.down', d => { if (TODO_STATE.select || !todoMoveBy(d.id, 1)) return; todoAnnounce('Tarea bajada'); });
+action('todo.move', d => todoOpenMove(d.id));
+action('todo.people', d => { if (d.id && !todoIsTmp(d.id) && typeof openPeoplePicker === 'function') openPeoplePicker(d.id); });
+action('todo.menu', d => todoOpenMenu(d.id));
+action('todo.collapse', () => { LS.set('todo.open', false); TODO_STATE.toggled = true; TODO_STATE.select = null; rerender(); });
+action('todo.expand', () => {
+  LS.set('todo.open', true);
+  TODO_STATE.toggled = true;
+  rerender();
+  todoFocus(document.getElementById('todo-add-aside'));
+});
+action('todo.sheet', () => todoOpenSheet());
+action('todo.doneToggle', (d, el) => {
+  const open = !todoDoneOpen();
+  LS.set('todo.doneOpen', open);
+  if (open) {
+    TODO_STATE.doneLimit = TODO_DONE_STEP;
+    const panel = el.closest('[data-todo-panel]');
+    if (panel) TODO_STATE.doneAnim[panel.dataset.todoPanel] = true;
+  }
+  todoRefresh();
+});
+action('todo.doneMore', () => { TODO_STATE.doneLimit += TODO_DONE_STEP; todoRefresh(); });
+</script>

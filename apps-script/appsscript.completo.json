@@ -1,0 +1,13 @@
+{
+  "timeZone": "America/Santiago",
+  "dependencies": {},
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "DOMAIN"
+  },
+  "urlFetchWhitelist": [
+    "https://generativelanguage.googleapis.com/"
+  ]
+}
