@@ -4,6 +4,16 @@ Esta revisión rediseña los jardines del plano de arquitectura `40000-PN-TONGOY
 
 El fondo de maicillo (patio trasero y estacionamientos) se mantiene sin cambios.
 
+## Rev. D (28/10/2026): mediana sin ningún riego
+
+La Rev. D sólo cambia la mediana del acceso al patio (S/R). Pasa a ser un jardín mineral, sin ningún riego, de gravilla natural y rocas sueltas del sitio. Lleva 14 *Copiapoa coquimbana* y 19 lirios del campo, plantados con las primeras lluvias. Queda con 2 especies y una cobertura de ~28 %, una desviación que debe validar COPEC. El resto del proyecto queda igual que en la Rev. C.
+
+| Archivo | Contenido |
+|---|---|
+| `40000-TONGOY-PJ-RevD_Addendum1_Mediana_Sin_Riego_y_Malla.pdf` | Opción sin riego y respuesta detallada sobre la malla antimaleza (2 páginas). |
+| `40000-TONGOY-PJ-L01-L02-RevD_Planos_Paisajismo.pdf` | L-01 y L-02 Rev. D. |
+| `40000-TONGOY-PJ-L01-RevD.dwg` / `40000-TONGOY-PJ-L01-RevD_completo.dxf` | Plano Rev. D (1.746 plantas). |
+
 ## Rev. C (27/10/2026): respuesta a consultas del contratista
 
 La Rev. C parte de la RevB (19/10/2026), que eliminó los paneles de educación ambiental y la identificación de zonas, y responde cuatro consultas del contratista.
