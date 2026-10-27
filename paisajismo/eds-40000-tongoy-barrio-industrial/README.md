@@ -4,7 +4,40 @@ Esta revisión rediseña los jardines del plano de arquitectura `40000-PN-TONGOY
 
 El fondo de maicillo (patio trasero y estacionamientos) se mantiene sin cambios.
 
-## Archivos
+## Rev. C (27/10/2026): respuesta a consultas del contratista
+
+La Rev. C parte de la RevB (19/10/2026), que eliminó los paneles de educación ambiental y la identificación de zonas, y responde cuatro consultas del contratista.
+
+| Archivo | Contenido |
+|---|---|
+| `40000-TONGOY-PJ-RevC_Respuesta_Consultas_Contratista_N1.pdf` | Respuesta a las cuatro consultas, con propuesta, fundamentos del Manual y cantidades (8 páginas). |
+| `40000-TONGOY-PJ-L01-L02-RevC_Planos_Paisajismo.pdf` | L-01 y L-02 Rev. C. |
+| `40000-TONGOY-PJ-L01-RevC.dwg` | Plano Rev. C en AutoCAD 2000, con la capa nueva `PJ-SECANO`. |
+| `40000-TONGOY-PJ-L01-RevC_completo.dxf` | Plano Rev. C en DXF R2000, con la base completa y atributos por planta. |
+
+Respuestas:
+
+1. **Mediana del acceso al patio, sin riego.** Pasa a jardín de secano con 4 especies nativas bajas y de fruto seco: *Copiapoa coquimbana*, pata de guanaco, lirio del campo y hierba del salitre. Lleva riego manual de establecimiento durante 2 años, desde el acople rápido de 32 mm. Se marca **S/R** en los planos.
+2. **"Full doca" en bordes e isla.** No cumple el Manual:
+   - Es un monocultivo, sin los estratos de borde.
+   - Cubre el 100 % del suelo.
+   - La "doca" comercial puede ser la invasora *Carpobrotus edulis*.
+   - Su fruto carnoso puede atraer roedores (§3.3.2).
+
+   En su lugar se propone una "alfombra nativa" de pata de guanaco y verbena chilena, con huingán y arbustos de barrera. La doca sólo se podría usar con una excepción formal de COPEC.
+3. **Separador para la gravilla.** Sólo en el perímetro de cada jardín: la solera existente o, contra maicillo, una solerilla de hormigón. Nunca al interior.
+4. **Malla antimaleza.** No va en ningún paño plantado. Las malezas se controlan antes de instalar y con desmalezado manual mensual.
+
+Balance de la Rev. C:
+
+- 1.749 plantas de 23 especies nativas (15 endémicas).
+- 2.440 goteros.
+- Costo directo de unos +$0,23 MM respecto de la RevB.
+- Se corrige un error gráfico del diagrama de riego de L-02: las matrices se dibujaban cerradas.
+
+Los archivos Rev. A se conservan como historial.
+
+## Archivos Rev. A
 
 | Archivo | Contenido |
 |---|---|
