@@ -17,7 +17,7 @@ La Rev. C parte de la RevB (19/10/2026), que eliminó los paneles de educación 
 
 Respuestas:
 
-1. **Mediana del acceso al patio, sin riego.** Pasa a jardín de secano con 4 especies nativas bajas y de fruto seco: *Copiapoa coquimbana*, pata de guanaco, lirio del campo y hierba del salitre. Lleva riego manual de establecimiento durante 2 años, desde el acople rápido de 32 mm. Se marca **S/R** en los planos.
+1. **Mediana del acceso al patio, sin riego.** Pasa a jardín de secano con 4 especies nativas bajas: *Copiapoa coquimbana*, pata de guanaco, lirio del campo y hierba del salitre (53 plantas, cobertura desarrollada de 60 %). Lleva riego manual de establecimiento durante 2 años, desde el acople rápido de 32 mm, como excepción al cap. 4 que debe aprobar COPEC. Se marca **S/R** en los planos.
 2. **"Full doca" en bordes e isla.** No cumple el Manual:
    - Es un monocultivo, sin los estratos de borde.
    - Cubre el 100 % del suelo.
@@ -30,10 +30,14 @@ Respuestas:
 
 Balance de la Rev. C:
 
-- 1.749 plantas de 23 especies nativas (15 endémicas).
-- 2.440 goteros.
-- Costo directo de unos +$0,23 MM respecto de la RevB.
-- Se corrige un error gráfico del diagrama de riego de L-02: las matrices se dibujaban cerradas.
+- 1.766 plantas de 23 especies nativas (15 endémicas).
+- 2.440 goteros; cambian los sectores de riego S2 y S3.
+- Variación neta de unos +$0,35 MM respecto de la RevB, sin contar la solerilla ni el riego manual.
+- Se corrigen las dimensiones de la hierba del salitre (0,3 x 0,6 m): la cobertura desarrollada total queda en 57 %.
+- Se corrigen tres errores de la RevA/RevB:
+  - Las matrices de riego de L-02 se dibujaban cerradas.
+  - En la jardinera T-2 había un doble conteo en las etiquetas.
+  - La regla de goteros de la nota 7 no coincidía con L-02.
 
 Los archivos Rev. A se conservan como historial.
 
