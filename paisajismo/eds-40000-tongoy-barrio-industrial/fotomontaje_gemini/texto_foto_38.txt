@@ -1,0 +1,19 @@
+=== FOTO foto_38.jpg + GUÍA guia_38.jpg: Bandejón poniente B-1, visto desde la esquina del cruce peatonal ===
+Edita esta foto de forma fotorrealista. Mantén EXACTAMENTE el mismo encuadre, cámara, luz, cielo y todo lo construido (pavimentos, soleras, muros, letreros, postes, edificios). Cambia solo el jardín, para mostrar cómo se verá un jardín nativo del matorral costero de Coquimbo (Chile) ya desarrollado (año 4-5, como la cobertura desarrollada del plano), en primavera:
+- Todo el suelo del jardín queda cubierto con una capa continua de gravilla natural de canto rodado gris-beige de 1-3 cm, como la que ya aparece en la foto. No debe quedar tierra a la vista ni mangueras de riego visibles.
+- Las plantas forman manchas orgánicas y naturales de una misma especie (grupos de 3 o más), de formas irregulares, con espacios de gravilla entre manchas. NO en hileras ni en líneas rectas.
+- Cobertura vegetal de aproximadamente 55-60 %; el resto, gravilla visible ENTRE las manchas (no un macizo continuo de flores). Las plantas no deben sobresalir sobre la solera.
+- Respeta la forma de crecimiento indicada en MAYÚSCULAS para cada especie (árbol, arbusto, herbácea, cubresuelo rastrero) y su altura.
+- Edita TODO el jardín visible, incluido el fondo, no solo el primer plano.
+- Sin césped, sin flores de jardín ornamental, sin palmeras, sin plantas exóticas, sin bolones ni piedras pegadas con cemento, sin bordes plásticos.
+- Usa como guía de ubicación la segunda imagen (las manchas u óvalos de color indican dónde va cada especie; los carteles rojos y negros, la leyenda y las etiquetas son instrucciones y NO deben aparecer en el resultado).
+
+En esta foto (bandejón poniente b-1, visto desde la esquina del cruce peatonal):
+Es el bandejón triangular entre la solera amarilla (izquierda) y el cruce peatonal (derecha). Según el plano, de cerca hacia el fondo: en la esquina más cercana una mancha de chamiza y, a lo largo de la solera amarilla, una mancha alargada de pata de guanaco; al centro una mancha grande de chamiza y una franja de pata de guanaco; a la derecha, junto al cruce, manchas de suspiro de mar y chamiza; hacia el fondo una mancha de coronilla del fraile con 3 chaguales chicos, y luego franjas largas de suspiro de mar, chamiza y coronilla del fraile hasta la punta del bandejón junto al disco PARE. Todas las plantas miden menos de 0,9 m: sin árboles ni arbustos altos. La franja de gravilla que separa el bandejón del cruce peatonal se mantiene.
+Especies (solo estas):
+- Suspiro de mar (Nolana paradoxa) - CUBRESUELO RASTRERO, PLANO, de máximo 20 cm: tallos que se extienden a ras de la gravilla con flores azul celeste en campanilla (NO es una mata ni un arbusto).
+- Pata de guanaco (Cistanthe grandiflora) - HERBÁCEA SUCULENTA baja: roseta gris-azulada a ras de suelo de 0,3 m, con varas finas de 40-60 cm con flores magenta.
+- Chamiza (Bahia ambrosioides) - ARBUSTO BAJO en mata redondeada de 0,8 m, follaje gris plateado muy dividido, con florcitas amarillas.
+- Coronilla del fraile (Encelia canescens) - ARBUSTO bajo de 0,9 m, follaje gris plateado aterciopelado, con flores amarillas tipo margarita.
+- Chagual chico (Puya venusta) - SUCULENTA en roseta de 0,7 m de hojas rígidas gris plateado con espinas, con vara floral de flores azul violáceo.
+
